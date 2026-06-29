@@ -1,0 +1,22 @@
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Datos e imágenes pesadas
+data/
+*.faiss
+
+# Archivos de caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# Frontend (Node)
+node_modules/
+dist/
+.DS_Store
