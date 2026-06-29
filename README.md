@@ -1,254 +1,335 @@
 # 🔍 Sistema Multimodal de Búsqueda de Imágenes
 
-Búsqueda de imágenes **texto → imagen** e **imagen → imagen** usando **CLIP**
-para los embeddings y **FAISS** para la búsqueda vectorial eficiente por
-similitud coseno. Backend en **FastAPI**, frontend en HTML/CSS/JS vanilla
-servido directamente desde el mismo servidor.
+Sistema de búsqueda **texto → imagen** e **imagen → imagen** usando **CLIP (ViT-B-32)** para la generación de embeddings y **PostgreSQL con pgvector** para búsqueda vectorial eficiente mediante similitud coseno.
 
-| Modo | Ruta | Entrada | Salida |
-|------|------|---------|--------|
-| Texto → Imagen | `/` | Una descripción (`"a sleeping cat"`) | Imágenes más parecidas |
-| Imagen → Imagen | `/image-search` | Una imagen subida | Imágenes visualmente similares |
+Cuenta con una **arquitectura desacoplada**: backend en **FastAPI** y frontend moderno e independiente empaquetado con **Vite**.
+
+| Modo | Endpoint | Entrada | Salida |
+|------|----------|---------|--------|
+| Texto → Imagen | `POST /search/text` | Descripción de texto (`"a sleeping cat"`) | Imágenes más relevantes |
+| Imagen → Imagen | `POST /search/image` | Imagen de consulta (JPG/PNG/WebP, máx. 10 MB) | Imágenes visualmente similares |
 
 ---
 
-## 🏗️ Arquitectura
+## 🏗️ Arquitectura Desacoplada
 
+```mermaid
+graph TD
+    subgraph Frontend["Aplicación Frontend - Vite, puerto 5173"]
+        UI[Interfaz Web]
+    end
+
+    subgraph Backend["Backend API - FastAPI, puerto 8000"]
+        CLIP["CLIP Encoder ViT-B-32"]
+        Routes["/search/text  /search/image  /health"]
+    end
+
+    subgraph Database["PostgreSQL + pgvector - Supabase"]
+        PG["Tabla: images\nid, image_path, categories, embedding VECTOR 512"]
+    end
+
+    UI -->|"HTTP POST /search/text"| Backend
+    UI -->|"HTTP POST /search/image"| Backend
+
+    Backend -->|"Genera Embedding 512-d"| CLIP
+    CLIP -->|"Retorna vector float32"| Backend
+    Backend -->|"Similitud coseno pgvector"| PG
+    PG -->|"Top-K resultados"| Backend
+    Backend -->|"JSON Response"| UI
 ```
-                   ┌─────────────────────────────────────────────┐
-   Texto  ───────► │ CLIP text encoder  ──┐                       │
-                   │                       ├─► embedding (512-d)   │
-   Imagen ───────► │ CLIP image encoder ──┘   (normalizado L2)    │
-                   └───────────────────────────────┬─────────────┘
-                                                    │
-                                                    ▼
-                                   ┌─────────────────────────────┐
-                                   │  FAISS IndexFlatIP           │
-                                   │  (inner product = coseno)    │
-                                   │  top-k vecinos más cercanos  │
-                                   └──────────────┬──────────────┘
-                                                  │
-                                                  ▼
-                                   JSON: [{ image_url, score }, ...]
-```
 
-Como CLIP proyecta texto e imágenes al **mismo espacio vectorial**, ambos tipos
-de consulta usan exactamente el mismo índice. Los embeddings se **normalizan
-L2**, por lo que el producto interno (`IndexFlatIP`) equivale a la **similitud
-coseno**.
+> CLIP proyecta texto e imágenes al **mismo espacio vectorial de 512 dimensiones**, por lo que ambas modalidades de consulta operan sobre el mismo índice en la base de datos. La similitud coseno se calcula directamente en PostgreSQL mediante el operador `<=>` de `pgvector`.
 
-### Estructura del proyecto
+---
 
-```
+## 📁 Estructura del Proyecto
+
+```text
 image_search_system/
 ├── backend/
-│   ├── main.py            # App FastAPI: lifespan, CORS, rutas, estáticos
-│   ├── embedder.py        # CLIP: get_text_embedding / get_image_embedding
-│   ├── indexer.py         # FAISS: build_index / load_index / search
-│   ├── utils.py           # Config (.env) + helpers de imágenes y respuestas
+│   ├── __init__.py
+│   ├── main.py            # App FastAPI: lifespan, CORS, montaje de imágenes estáticas
+│   ├── embedder.py        # Integración con CLIP via open-clip-torch (ViT-B-32/openai)
+│   ├── indexer.py         # Lógica de indexado: PostgreSQL (pgvector) + fallback FAISS
+│   ├── database.py        # Conexión psycopg2, init_db(), execute_query()
+│   ├── utils.py           # Config desde .env, helpers de imagen y formateo de respuestas
 │   └── routes/
-│       ├── text_search.py   # POST /search/text
-│       └── image_search.py  # POST /search/image
+│       ├── text_search.py   # POST /search/text (Text-to-Image)
+│       └── image_search.py  # POST /search/image (Image-to-Image)
 ├── frontend/
-│   ├── templates/         # index.html, image_search.html (Jinja2)
-│   └── static/            # css/styles.css, js/app.js
+│   ├── index.html           # Búsqueda por texto
+│   ├── image-search.html    # Búsqueda por imagen
+│   ├── main.js              # Lógica JavaScript del frontend
+│   ├── style.css            # Estilos
+│   └── package.json         # Dependencias (Vite ^8.1.0)
 ├── data/
-│   ├── images/            # Imágenes del dataset (pobladas por script)
-│   └── embeddings/        # index.faiss + image_paths.json (generados)
+│   ├── images/              # Imágenes del dataset (MS COCO subset)
+│   └── embeddings/          # Archivos locales de índice FAISS (modo opcional)
 ├── scripts/
-│   ├── download_dataset.py  # Descarga el dataset desde HuggingFace
-│   └── build_index.py       # Extrae embeddings y construye el índice
-├── requirements.txt
-├── .env.example
-└── README.md
+│   ├── download_coco.py     # Descarga optimizada del dataset MS COCO (100 imgs/categoría)
+│   ├── build_index.py       # Genera embeddings e inserta en PostgreSQL (o FAISS)
+│   ├── standalone_embedder.py  # Pruebas y visualización de embeddings
+│   └── test_similarity.py   # Pruebas de búsqueda por similitud coseno
+├── requirements.txt         # Dependencias Python
+├── .env.example             # Plantilla de variables de entorno
+└── README.md                # Este archivo
 ```
 
 ---
 
-## ✅ Requisitos previos
+## ✅ Requisitos Previos
 
-- **Python 3.10+**
-- **~4 GB de espacio en disco** (modelo CLIP + dataset)
-- **Conexión a internet** en la primera ejecución (descarga del modelo y del
-  dataset desde HuggingFace)
-
-> El modelo por defecto es `ViT-B-32` (pesos `openai`), que corre cómodamente en
-> CPU. No se requiere GPU.
+| Requisito | Versión mínima | Notas |
+|-----------|----------------|-------|
+| Python | 3.10+ | Requerido por FastAPI y open-clip |
+| Node.js | 18+ | Para el frontend con Vite |
+| PostgreSQL + `pgvector` | PostgreSQL 14+ | Se recomienda [Supabase](https://supabase.com/) (cloud gratis) |
+| Espacio en disco | ~4 GB | Modelo CLIP (~350 MB) + imágenes MS COCO |
 
 ---
 
-## 🚀 Instalación y ejecución
+## ⚙️ Variables de Entorno (`.env`)
+
+Copia `.env.example` a `.env` y completa los valores:
 
 ```bash
-# 1. Crear y activar un entorno virtual
-python -m venv venv
-source venv/bin/activate          # En Windows: venv\Scripts\activate
+cp .env.example .env
+```
 
-# 2. Instalar dependencias
+| Variable | Descripción | Valor por defecto |
+|----------|-------------|-------------------|
+| `DATA_DIR` | Ruta raíz de imágenes y archivos de índice | `<raíz>/data` |
+| `TOP_K_DEFAULT` | Número de resultados por defecto | `6` |
+| `MODEL_NAME` | Arquitectura del modelo CLIP (open-clip) | `ViT-B-32` |
+| `PRETRAINED` | Pesos preentrenados del modelo | `openai` |
+| `SUPABASE_URL` | URL del proyecto Supabase | — |
+| `SUPABASE_SECRET_KEY` | Clave secreta de la API de Supabase | — |
+| `SUPABASE_DB_HOST` | Host de la base de datos PostgreSQL | — |
+| `SUPABASE_DB_PORT` | Puerto PostgreSQL | `5432` |
+| `SUPABASE_DB_NAME` | Nombre de la base de datos | `postgres` |
+| `SUPABASE_DB_USER` | Usuario de la base de datos | `postgres` |
+| `SUPABASE_DB_PASSWORD` | Contraseña de la base de datos | — |
+
+> ⚠️ **Importante:** el archivo `.env` contiene credenciales. Está incluido en `.gitignore` y **nunca** debe subirse al repositorio.
+
+---
+
+## 🗄️ Esquema de Base de Datos
+
+La tabla principal `images` es creada automáticamente por `init_db()` al iniciar el backend por primera vez (si la conexión es exitosa):
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS images (
+    id          SERIAL PRIMARY KEY,
+    image_path  TEXT UNIQUE NOT NULL,     -- Ruta relativa a data/images/
+    categories  JSONB,                     -- Categorías MS COCO (ej: ["cat", "indoor"])
+    embedding   VECTOR(512)                -- Embedding CLIP normalizado L2
+);
+```
+
+La búsqueda usa el operador coseno `<=>` de pgvector:
+
+```sql
+SELECT image_path, categories, 1 - (embedding <=> %s) AS similarity
+FROM images
+ORDER BY embedding <=> %s
+LIMIT %s;
+```
+
+---
+
+## 🚀 Instalación y Ejecución
+
+El sistema se compone de **dos servicios independientes**. Necesitas dos terminales separadas.
+
+### 1. Configuración de la Base de Datos
+
+1. Crea un proyecto gratuito en [Supabase](https://supabase.com/).
+2. En el SQL Editor de Supabase, habilita la extensión pgvector:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+3. Obtén las credenciales de conexión en **Project Settings → Database**.
+
+### 2. Backend (FastAPI)
+
+```bash
+# Desde la raíz del proyecto: image_search_system/
+
+# 1. Crear y activar entorno virtual
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # Linux / macOS
+
+# 2. Instalar dependencias Python
 pip install -r requirements.txt
 
-# 3. Descargar el dataset (por defecto Oxford Flowers 102, ~2000 imágenes)
-python scripts/download_dataset.py
+# 3. Configurar variables de entorno
+cp .env.example .env
+# → Edita .env con tus credenciales de Supabase
 
-# 4. Construir el índice FAISS (5–15 min según el hardware)
+# 4. Descargar el dataset MS COCO (100 imágenes por categoría, ~8000 imágenes en total)
+python scripts/download_coco.py
+
+# 5. Generar embeddings e insertar en PostgreSQL
 python scripts/build_index.py
 
-# 5. Iniciar el servidor
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+# 6. Iniciar el servidor backend
+uvicorn backend.main:app --reload --port 8000
 ```
 
-Luego abrir en el navegador:
+> ⚠️ Siempre ejecuta `uvicorn` y los scripts **desde la raíz del proyecto** (`image_search_system/`), no desde subcarpetas.
 
-- Búsqueda por texto:  <http://localhost:8000/>
-- Búsqueda por imagen: <http://localhost:8000/image-search>
+El backend quedará disponible en: `http://localhost:8000`  
+Documentación interactiva OpenAPI: `http://localhost:8000/docs`
 
-> ⚠️ Ejecuta `uvicorn` **desde la raíz del proyecto** (la carpeta
-> `image_search_system/`), de modo que el paquete `backend` sea importable.
+### 3. Frontend (Vite)
 
----
-
-## 🗂️ Elección del dataset
-
-El script `download_dataset.py` usa la librería `datasets` de HuggingFace y
-acepta varias opciones:
+En una **nueva terminal**:
 
 ```bash
-# Oxford Flowers 102 (por defecto, ligero y fiable)
-python scripts/download_dataset.py
-
-# Imagenette: 10 clases de fotos reales y diversas (mejor demo de texto)
-python scripts/download_dataset.py --dataset imagenette
-
-# Limitar la cantidad de imágenes
-python scripts/download_dataset.py --max-images 1000
-
-# Cualquier dataset de imágenes del Hub por su repo id
-python scripts/download_dataset.py --dataset <usuario/dataset> --split train
+cd frontend
+npm install
+npm run dev
 ```
 
-> 💡 El ejemplo `"a sleeping cat"` luce mejor con un dataset **diverso**. Flowers
-> es homogéneo (solo flores); para una demo más vistosa de texto→imagen usa
-> `--dataset imagenette` o un mirror de COCO. Con Flowers, prueba consultas como
-> `"a field of yellow flowers"` o `"a pink rose"`.
-
-Tras descargar, **vuelve a ejecutar** `python scripts/build_index.py` para
-reconstruir el índice con las nuevas imágenes.
+El frontend estará disponible en `http://localhost:5173`.
 
 ---
 
-## 🔌 API
+## 🗂️ Dataset: MS COCO (Subset)
 
-### `POST /search/text`
-```jsonc
-// Request
-{ "query": "a sleeping cat", "top_k": 6 }
+Para optimizar el almacenamiento y el tiempo de procesamiento, el script `download_coco.py` descarga únicamente **100 imágenes por categoría** de las 80 categorías del dataset [MS COCO](https://cocodataset.org/), resultando en un máximo de ~8.000 imágenes representativas.
+
+```bash
+# Descargar el dataset (puede tardar varios minutos según la conexión)
+python scripts/download_coco.py
+
+# Re-indexar después de agregar nuevas imágenes
+python scripts/build_index.py
+```
+
+Las imágenes se almacenan en `data/images/` organizadas por categoría.
+
+---
+
+## 🔌 API Endpoints
+
+### `POST /search/text` — Búsqueda Texto → Imagen
+
+```json
+// Request body (JSON)
+{
+  "query": "a sleeping cat",
+  "top_k": 6
+}
 
 // Response
 {
   "results": [
-    { "image_url": "/images/img000123.jpg", "score": 0.8731 },
-    ...
+    {
+      "image_url": "/images/cat/000000123.jpg",
+      "score": 0.8731,
+      "categories": ["cat", "indoor"]
+    }
   ],
   "count": 6,
-  "took_ms": 41.2
+  "took_ms": 45.2
 }
 ```
 
-### `POST /search/image`
-`multipart/form-data` con el campo `file` (JPG/PNG/WebP) y, opcionalmente,
-`top_k`. La respuesta tiene la misma forma que la de texto.
+### `POST /search/image` — Búsqueda Imagen → Imagen
 
-```bash
-curl -X POST http://localhost:8000/search/image \
-  -F "file=@/ruta/a/mi_imagen.jpg" \
-  -F "top_k=6"
+Petición `multipart/form-data`:
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `file` | `UploadFile` | Imagen de consulta (JPG/PNG/WebP/BMP, máx. 10 MB) |
+| `top_k` | `int` (opcional) | Número de resultados (1–50, default: 6) |
+
+Respuesta: misma estructura que `/search/text`.
+
+### `GET /health` — Estado del Sistema
+
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "index_loaded": true,
+  "index_size": 7843
+}
 ```
 
-### Otros endpoints
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| `GET` | `/` | Página de búsqueda por texto |
-| `GET` | `/image-search` | Página de búsqueda por imagen |
-| `GET` | `/images/{nombre}` | Sirve las imágenes del dataset (estáticas) |
-| `GET` | `/health` | Estado del modelo y del índice |
-| `GET` | `/docs` | Documentación interactiva (Swagger UI) |
-
-### Manejo de errores
-- **400** — el archivo subido no es una imagen válida.
-- **503** — el índice FAISS aún no está cargado (ejecuta `build_index.py` y
-  reinicia el servidor).
+Útil para monitorear si el modelo CLIP y la conexión a PostgreSQL están activos sin realizar una búsqueda real.
 
 ---
 
-## 📈 Notas sobre escalabilidad
+## 📈 Búsqueda Vectorial y Escalabilidad (pgvector)
 
-La arquitectura está pensada para crecer:
+Al usar PostgreSQL + `pgvector` como backend de vectores, la aplicación está preparada para producción:
 
-- **Índice aproximado para datasets grandes.** `IndexFlatIP` es exacto pero hace
-  búsqueda por fuerza bruta (O(N) por consulta). Para **> 100K imágenes**,
-  cámbialo por `IndexIVFFlat`. En `backend/indexer.py` ya está documentado el
-  reemplazo:
-
-  ```python
-  nlist = 100
-  quantizer = faiss.IndexFlatIP(dim)
-  index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
-  index.train(vectors)   # IVF requiere una pasada de entrenamiento
-  index.add(vectors)
-  index.nprobe = 10      # compromiso velocidad/exactitud
+- **Índices vectoriales:** `pgvector` soporta índices **IVFFlat** y **HNSW** para búsquedas aproximadas (ANN) mucho más rápidas en datasets de miles o millones de vectores:
+  ```sql
+  -- Ejemplo: crear índice HNSW para búsqueda aproximada rápida
+  CREATE INDEX ON images USING hnsw (embedding vector_cosine_ops);
   ```
-
-- **Memoria controlada.** Si la RAM es limitada, los embeddings pueden
-  calcularse y persistirse **por bloques (chunks)** en lugar de mantener toda la
-  matriz en memoria.
-
-- **Escalado horizontal.** La API es **stateless**: el índice se carga al inicio
-  y solo se lee. Puede replicarse tras un balanceador o servirse con varios
-  workers:
-
-  ```bash
-  uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
-  ```
-
-- **Aceleración del indexado.** `build_index.py` embebe imagen por imagen
-  (siguiendo el flujo del enunciado). Para corpus grandes conviene **procesar
-  por lotes (batches)** en la GPU, lo que reduce drásticamente el tiempo de
-  construcción.
+- **Rendimiento asíncrono:** Las búsquedas síncronas de psycopg2 se ejecutan en un `ThreadPoolExecutor` vía `run_in_threadpool`, evitando bloquear el event loop de FastAPI.
+- **Modo FAISS (fallback):** Si no tienes acceso a PostgreSQL, puedes activar `USE_FAISS = True` en `backend/indexer.py` para usar un índice local FAISS (`data/embeddings/index.faiss`). Útil para desarrollo sin conexión.
 
 ---
 
-## ⚙️ Configuración (`.env`)
+## 🤖 Modelo CLIP
 
-Copia `.env.example` a `.env` para ajustar parámetros (todos tienen valores por
-defecto):
+El proyecto usa el modelo **`ViT-B-32`** con pesos **`openai`** a través de la librería [`open-clip-torch`](https://github.com/mlfoundations/open_clip):
 
-| Variable | Por defecto | Descripción |
-|----------|-------------|-------------|
-| `DATA_DIR` | `<root>/data` | Carpeta de imágenes e índice |
-| `TOP_K_DEFAULT` | `6` | Número de resultados por consulta |
-| `MODEL_NAME` | `ViT-B-32` | Arquitectura CLIP (open-clip) |
-| `PRETRAINED` | `openai` | Pesos preentrenados |
+| Parámetro | Valor |
+|-----------|-------|
+| Arquitectura | `ViT-B-32` |
+| Pesos | `openai` (preentrenado en WIT-400M) |
+| Dimensión de embedding | **512** |
+| Librería | `open-clip-torch >= 2.24.0` |
+| Dispositivo | CUDA → MPS → CPU (auto-detectado) |
 
----
+Los embeddings de texto e imagen son **normalizados L2** antes de insertarse en la BD, lo que hace que la distancia coseno sea equivalente al producto punto.
 
-## 🧰 Solución de problemas
-
-| Problema | Causa probable | Solución |
-|----------|----------------|----------|
-| `503 ... index is not loaded` | Falta el índice | Ejecuta `python scripts/build_index.py` y reinicia |
-| `No images found in ...` | Dataset sin descargar | Ejecuta `python scripts/download_dataset.py` |
-| `ModuleNotFoundError: backend` | Ruta de ejecución incorrecta | Lanza `uvicorn` desde la raíz del proyecto |
-| Descarga del dataset falla | Dataset no disponible | Prueba `--dataset imagenette` u otro repo id |
-| Instalación de `torch` lenta | Wheel grande | Es normal en la primera instalación |
+> El modelo puede cambiarse vía las variables de entorno `MODEL_NAME` y `PRETRAINED`. Ver el [repositorio de open_clip](https://github.com/mlfoundations/open_clip#pretrained-models) para ver todos los modelos disponibles (ej. `ViT-L-14/openai`, `ViT-B-16/laion2b_s34b_b88k`).
 
 ---
 
-## 🧪 Stack tecnológico
+## 🧪 Stack Tecnológico
 
-- **Backend:** FastAPI · Uvicorn
-- **ML / Embeddings:** open-clip-torch (CLIP `ViT-B-32`) · PyTorch
-- **Búsqueda vectorial:** FAISS (`faiss-cpu`, `IndexFlatIP`)
-- **Imágenes:** Pillow · NumPy
-- **Datos:** HuggingFace `datasets`
-- **Frontend:** HTML + CSS + JavaScript vanilla (servido con `StaticFiles` +
-  `Jinja2Templates`)
+| Capa | Tecnologías |
+|------|-------------|
+| **Backend** | FastAPI 0.111+ · Uvicorn (ASGI) |
+| **ML / Embeddings** | open-clip-torch 2.24+ · PyTorch 2.6+ · torchvision |
+| **Búsqueda Vectorial** | PostgreSQL + `pgvector` · psycopg2 |
+| **Cloud DB** | [Supabase](https://supabase.com/) (PostgreSQL gestionado) |
+| **Procesamiento de Imagen** | Pillow 10.3+ · NumPy |
+| **Dataset** | MS COCO 2017 (subset 100 imgs/categoría) |
+| **Frontend** | HTML5 + CSS3 + JavaScript (Vanilla) · Vite 8.1+ |
+| **Entorno** | Python 3.10+ · Node.js 18+ · python-dotenv |
+
+---
+
+## 🛠️ Scripts de Utilidad
+
+| Script | Descripción |
+|--------|-------------|
+| `scripts/download_coco.py` | Descarga el dataset MS COCO (100 imgs/categoría) con multi-threading |
+| `scripts/build_index.py` | Genera embeddings CLIP e inserta en PostgreSQL (acepta `--images-dir`) |
+| `scripts/standalone_embedder.py` | Pruebas interactivas del encoder CLIP de forma aislada |
+| `scripts/test_similarity.py` | Valida la búsqueda por similitud coseno contra la base de datos |
+
+---
+
+## 🐛 Solución de Problemas Comunes
+
+| Error | Causa probable | Solución |
+|-------|---------------|----------|
+| `HTTP 503` en búsqueda | BD no inicializada | Ejecutar `build_index.py` y reiniciar el backend |
+| `connection refused` | Credenciales `.env` incorrectas | Verificar `SUPABASE_DB_HOST`, `SUPABASE_DB_PASSWORD` |
+| `No images found` | Carpeta `data/images/` vacía | Ejecutar `download_coco.py` primero |
+| CORS error en frontend | Backend no está corriendo | Verificar que uvicorn esté activo en el puerto 8000 |
+| `ModuleNotFoundError: backend` | Uvicorn no se ejecuta desde la raíz | Ejecutar `uvicorn` desde `image_search_system/` |
