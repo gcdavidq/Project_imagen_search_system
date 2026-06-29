@@ -15,27 +15,28 @@ Cuenta con una **arquitectura desacoplada**: backend en **FastAPI** y frontend m
 
 ```mermaid
 graph TD
-    subgraph Frontend["Aplicación Frontend - Vite, puerto 5173"]
+    subgraph Frontend["Aplicación Frontend (Vite - Puerto 5173)"]
         UI[Interfaz Web]
     end
 
-    subgraph Backend["Backend API - FastAPI, puerto 8000"]
-        CLIP["CLIP Encoder ViT-B-32"]
-        Routes["/search/text  /search/image  /health"]
+    subgraph Backend["Backend API (FastAPI - Puerto 8000)"]
+        direction LR
+        Routes["/search/text<br>/search/image<br>/health"]
+        CLIP["CLIP Encoder<br>ViT-B-32"]
     end
 
-    subgraph Database["PostgreSQL + pgvector - Supabase"]
-        PG["Tabla: images\nid, image_path, categories, embedding VECTOR 512"]
+    subgraph Database["Base de Datos (PostgreSQL + pgvector)"]
+        PG[("Tabla: images<br>id, image_path, categories<br>embedding VECTOR(512)")]
     end
 
-    UI -->|"HTTP POST /search/text"| Backend
-    UI -->|"HTTP POST /search/image"| Backend
+    UI -->|"POST /search/text"| Routes
+    UI -->|"POST /search/image"| Routes
 
-    Backend -->|"Genera Embedding 512-d"| CLIP
-    CLIP -->|"Retorna vector float32"| Backend
-    Backend -->|"Similitud coseno pgvector"| PG
-    PG -->|"Top-K resultados"| Backend
-    Backend -->|"JSON Response"| UI
+    Routes -->|"Generar embedding 512-d"| CLIP
+    CLIP -->|"Vector float32"| Routes
+    Routes -->|"Consulta similitud coseno"| PG
+    PG -->|"Top-K resultados"| Routes
+    Routes -->|"JSON Response"| UI
 ```
 
 > CLIP proyecta texto e imágenes al **mismo espacio vectorial de 512 dimensiones**, por lo que ambas modalidades de consulta operan sobre el mismo índice en la base de datos. La similitud coseno se calcula directamente en PostgreSQL mediante el operador `<=>` de `pgvector`.
@@ -148,9 +149,11 @@ El sistema se compone de **dos servicios independientes**. Necesitas dos termina
 
 1. Crea un proyecto gratuito en [Supabase](https://supabase.com/).
 2. En el SQL Editor de Supabase, habilita la extensión pgvector:
+
    ```sql
    CREATE EXTENSION IF NOT EXISTS vector;
    ```
+
 3. Obtén las credenciales de conexión en **Project Settings → Database**.
 
 ### 2. Backend (FastAPI)
@@ -271,10 +274,12 @@ Respuesta: misma estructura que `/search/text`.
 Al usar PostgreSQL + `pgvector` como backend de vectores, la aplicación está preparada para producción:
 
 - **Índices vectoriales:** `pgvector` soporta índices **IVFFlat** y **HNSW** para búsquedas aproximadas (ANN) mucho más rápidas en datasets de miles o millones de vectores:
+
   ```sql
   -- Ejemplo: crear índice HNSW para búsqueda aproximada rápida
   CREATE INDEX ON images USING hnsw (embedding vector_cosine_ops);
   ```
+
 - **Rendimiento asíncrono:** Las búsquedas síncronas de psycopg2 se ejecutan en un `ThreadPoolExecutor` vía `run_in_threadpool`, evitando bloquear el event loop de FastAPI.
 - **Modo FAISS (fallback):** Si no tienes acceso a PostgreSQL, puedes activar `USE_FAISS = True` en `backend/indexer.py` para usar un índice local FAISS (`data/embeddings/index.faiss`). Útil para desarrollo sin conexión.
 
