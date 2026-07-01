@@ -28,7 +28,38 @@ logger = logging.getLogger("image_search")
 # --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the CLIP model and PostgreSQL connection on start-up; release on shutdown."""
+    """
+    Gestiona el ciclo de vida de la aplicación FastAPI (startup y shutdown).
+
+    Al **inicio** (startup):
+    1. Crea los directorios de datos necesarios (``utils.ensure_dirs()``).
+    2. Carga el modelo CLIP en memoria (``embedder.load_model()``).
+    3. Inicializa el índice de búsqueda / conexión a PostgreSQL
+       (``indexer.load_index()``). Si falla, el servidor sigue arrancando
+       en modo degradado y los endpoints de búsqueda retornan HTTP 503
+       hasta que el índice sea construido manualmente.
+
+    Al **cierre** (shutdown): registra el evento en el logger.
+
+    Parameters
+    ----------
+    app : fastapi.FastAPI
+        Instancia de la aplicación FastAPI inyectada automáticamente por
+        el framework al registrar el lifespan.
+
+    Yields
+    ------
+    None
+        Punto de suspensión entre startup y shutdown; la aplicación
+        atiende requests mientras está suspendida aquí.
+
+    Notes
+    -----
+    - Debe registrarse como ``lifespan=lifespan`` en el constructor de
+      ``FastAPI()``, no como evento ``@app.on_event`` (patrón moderno).
+    - Los errores de ``indexer.load_index()`` se capturan y logean como
+      advertencia para permitir que el servidor inicie de todas formas.
+    """
     logger.info("Starting up: loading CLIP model and DB connection ...")
     utils.ensure_dirs()
 
@@ -93,7 +124,27 @@ app.include_router(image_search.router)
 
 @app.get("/health")
 async def health():
-    """Lightweight readiness probe for monitoring / load balancers."""
+    """
+    Endpoint de verificación de estado (health check) del servidor.
+
+    Retorna el estado operativo de los componentes críticos:
+    modelo CLIP e indexador de búsqueda. Útil para monitoreo,
+    load balancers y scripts de despliegue.
+
+    Parameters
+    ----------
+    Ninguno.
+
+    Returns
+    -------
+    dict
+        Diccionario JSON con las siguientes claves:
+
+        - ``"status"`` (str): siempre ``"ok"`` si el servidor está corriendo.
+        - ``"model_loaded"`` (bool): ``True`` si el modelo CLIP está en memoria.
+        - ``"index_loaded"`` (bool): ``True`` si el indexador/BD está listo.
+        - ``"index_size"`` (int): número de imágenes indexadas actualmente.
+    """
     return {
         "status": "ok",
         "model_loaded": embedder.is_ready(),
@@ -107,6 +158,28 @@ async def health():
 # --------------------------------------------------------------------------- #
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(_request: Request, exc: RuntimeError):
-    """Surface unexpected runtime errors (e.g. DB not loaded) as HTTP 503."""
+    """
+    Manejador global de excepciones ``RuntimeError`` para toda la aplicación.
+
+    Convierte errores de tiempo de ejecución no capturados (principalmente
+    el lanzado por ``indexer.search()`` cuando la BD no está lista) en
+    respuestas HTTP 503 con un mensaje descriptivo en el cuerpo JSON.
+
+    Parameters
+    ----------
+    _request : fastapi.Request
+        Objeto de la petición HTTP que desencadenó el error. No se utiliza
+        directamente, pero es requerido por la firma del handler de FastAPI.
+    exc : RuntimeError
+        Instancia de la excepción capturada. Su mensaje (``str(exc)``) se
+        incluye en el campo ``"detail"`` de la respuesta JSON.
+
+    Returns
+    -------
+    fastapi.responses.JSONResponse
+        Respuesta HTTP con:
+        - Código de estado: ``503 Service Unavailable``.
+        - Cuerpo: ``{"detail": "<mensaje del error>"}``.
+    """
     logger.error("Runtime error: %s", exc)
     return JSONResponse(status_code=503, content={"detail": str(exc)})

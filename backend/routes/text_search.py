@@ -55,7 +55,51 @@ class SearchResponse(BaseModel):
     }
 )
 async def search_text(request: TextSearchRequest) -> SearchResponse:
-    """Retorna las imágenes más similares a una consulta de texto libre."""
+    """
+    Busca imágenes por similitud semántica usando una consulta de texto libre.
+
+    Convierte el texto de entrada en un embedding vectorial mediante el modelo
+    CLIP multilingüe, luego ejecuta una búsqueda por similitud del coseno en
+    la base de datos PostgreSQL (pgvector) y retorna las ``top_k`` imágenes
+    más similares en orden descendente de relevancia.
+
+    Parameters
+    ----------
+    request : TextSearchRequest
+        Cuerpo de la petición JSON con los campos:
+
+        - ``query`` (str): texto descriptivo de lo que se desea encontrar.
+          Mínimo 1 carácter, soporta múltiples idiomas.
+        - ``top_k`` (int, opcional): número de resultados a retornar
+          (entre 1 y 50; por defecto ``utils.TOP_K_DEFAULT``).
+
+    Returns
+    -------
+    SearchResponse
+        Respuesta JSON con los campos:
+
+        - ``results`` (List[SearchResult]): lista ordenada de imágenes
+          más similares, cada una con ``image_url``, ``score`` y
+          ``categories`` opcionales.
+        - ``count`` (int): número de resultados retornados.
+        - ``took_ms`` (float): tiempo total de embedding + búsqueda
+          en milisegundos.
+
+    Raises
+    ------
+    HTTPException (503)
+        Si el indexador/base de datos no está listo (``indexer.is_ready()``
+        retorna ``False``).
+    HTTPException (400)
+        Si la consulta, luego de aplicar ``.strip()``, queda vacía.
+
+    Notes
+    -----
+    - La búsqueda en BD es síncrona; se ejecuta en un hilo separado
+      mediante ``run_in_threadpool`` para no bloquear el event loop.
+    - El tiempo medido incluye tanto el embedding del texto como la
+      consulta vectorial en PostgreSQL.
+    """
     if not indexer.is_ready():
         raise HTTPException(
             status_code=503,

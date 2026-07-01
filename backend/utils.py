@@ -40,9 +40,11 @@ INDEX_PATH: str = os.path.join(EMBEDDINGS_DIR, "index.faiss")
 PATHS_PATH: str = os.path.join(EMBEDDINGS_DIR, "image_paths.json")
 
 
-# Selección del modelo CLIP.
-MODEL_NAME: str = os.getenv("MODEL_NAME", "ViT-B-32")
-PRETRAINED: str = os.getenv("PRETRAINED", "openai")
+# Selección del modelo CLIP multilingüe (OpenCLIP).
+# Modelo: xlm-roberta-base-ViT-B-32, pesos: laion5b_s13b_b90k
+# Soporta búsquedas en múltiples idiomas gracias al encoder de texto multilingüe.
+MODEL_NAME: str = os.getenv("MODEL_NAME", "xlm-roberta-base-ViT-B-32")
+PRETRAINED: str = os.getenv("PRETRAINED", "laion5b_s13b_b90k")
 
 # Número predeterminado de resultados devueltos por una búsqueda.
 TOP_K_DEFAULT: int = int(os.getenv("TOP_K_DEFAULT", "6"))
@@ -64,7 +66,21 @@ DB_PASSWORD: str = os.getenv("SUPABASE_DB_PASSWORD", "")
 
 
 def ensure_dirs() -> None:
-    """Crear los directorios de datos si aún no existen."""
+    """
+    Crea los directorios de datos del proyecto si aún no existen.
+
+    Crea de forma recursiva (``os.makedirs(..., exist_ok=True)``) los
+    directorios ``IMAGES_DIR`` y ``EMBEDDINGS_DIR`` definidos en este módulo.
+    No hace nada si los directorios ya existen.
+
+    Parameters
+    ----------
+    Ninguno.
+
+    Returns
+    -------
+    None
+    """
     os.makedirs(IMAGES_DIR, exist_ok=True)
     os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 
@@ -75,12 +91,30 @@ def ensure_dirs() -> None:
 
 def load_image_from_bytes(data: bytes) -> Image.Image:
     """
-    Decodificar bytes crudos en una imagen RGB :class:`PIL.Image.Image`.
+    Decodifica bytes crudos en una imagen RGB ``PIL.Image.Image``.
+
+    Abre la imagen desde el buffer de bytes, fuerza la decodificación
+    completa (para detectar archivos corruptos de inmediato) y convierte
+    el resultado al modo ``RGB`` para compatibilidad con el preprocesador CLIP.
+
+    Parameters
+    ----------
+    data : bytes
+        Contenido binario de un archivo de imagen (JPG, PNG, WebP, BMP, etc.).
+        Obtenido típicamente de ``await upload_file.read()`` en FastAPI.
+
+    Returns
+    -------
+    PIL.Image.Image
+        Imagen decodificada en modo ``RGB``, lista para ser pasada al
+        preprocesador de CLIP (``embedder.get_image_embedding``).
 
     Raises
     ------
     ValueError
-        Si los bytes no contienen una imagen válida y decodificable.
+        Si los bytes no contienen una imagen válida o decodificable
+        (archivo corrupto, formato no soportado, bytes truncados, etc.).
+        Envuelve la excepción original de Pillow como causa.
     """
     try:
         image = Image.open(io.BytesIO(data))
@@ -93,8 +127,31 @@ def load_image_from_bytes(data: bytes) -> Image.Image:
 
 def list_image_files(directory: str) -> List[str]:
     """
-    Devolver una lista ordenada de rutas de archivos de imagen (relativas a ``directory``) encontradas
-    recursivamente bajo ``directory``.
+    Lista recursivamente todos los archivos de imagen dentro de un directorio.
+
+    Recorre el árbol de directorios con ``os.walk`` y filtra los archivos
+    cuya extensión sea ``.jpg``, ``.jpeg``, ``.png``, ``.webp`` o ``.bmp``.
+    Los resultados se devuelven como rutas relativas al directorio raíz,
+    ordenadas alfabéticamente.
+
+    Parameters
+    ----------
+    directory : str
+        Ruta absoluta o relativa al directorio raíz donde buscar imágenes.
+        Generalmente es ``utils.IMAGES_DIR``.
+
+    Returns
+    -------
+    List[str]
+        Lista ordenada de rutas relativas (respecto a ``directory``) de
+        todos los archivos de imagen encontrados. Puede ser lista vacía
+        si no se encuentra ninguna imagen.
+
+    Notes
+    -----
+    - La búsqueda es **recursiva**: incluye imágenes en subdirectorios.
+    - La comparación de extensiones es insensible a mayúsculas/minúsculas
+      (usa ``.lower()``).
     """
     exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
     found: List[str] = []
@@ -112,7 +169,25 @@ def list_image_files(directory: str) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 def to_image_url(relative_path: str) -> str:
-    """Convertir una ruta relativa a ``IMAGES_DIR`` en una URL de imagen pública."""
+    """
+    Convierte una ruta relativa de imagen en una URL pública servida por la API.
+
+    Combina el prefijo de URL configurado (``IMAGE_URL_PREFIX``, por defecto
+    ``/images``) con la ruta relativa normalizada (separadores de Windows
+    convertidos a ``/``).
+
+    Parameters
+    ----------
+    relative_path : str
+        Ruta del archivo relativa a ``IMAGES_DIR``.
+        Ejemplo: ``"gatos\\siames.jpg"`` (Windows) o ``"gatos/siames.jpg"``.
+
+    Returns
+    -------
+    str
+        URL pública de la imagen lista para incrustar en respuestas JSON.
+        Ejemplo: ``"/images/gatos/siames.jpg"``.
+    """
     # Normalizar los separadores de Windows para que las URLs estén siempre basadas en barras diagonales.
     clean = relative_path.replace(os.sep, "/").lstrip("/")
     return f"{IMAGE_URL_PREFIX}/{clean}"
@@ -120,8 +195,38 @@ def to_image_url(relative_path: str) -> str:
 
 def format_results(results: List[Dict]) -> List[Dict]:
     """
-    Convertir las coincidencias brutas del indexador ``[{"image_path", "score", "categories"}]`` en la forma de
-    respuesta de la API esperada por el frontend.
+    Transforma la lista de resultados crudos del indexador al formato de respuesta de la API.
+
+    Convierte cada entrada del indexador (que usa rutas de archivo locales)
+    en un diccionario con URLs públicas y puntuaciones redondeadas,
+    compatible con el esquema Pydantic ``SearchResult`` del frontend.
+
+    Parameters
+    ----------
+    results : List[Dict]
+        Lista de diccionarios retornados por ``indexer.search()``. Cada
+        elemento debe contener al menos:
+
+        - ``"image_path"`` (str): ruta relativa de la imagen en ``IMAGES_DIR``.
+        - ``"score"`` (float): puntuación de similitud del coseno.
+        - ``"categories"`` (list, opcional): categorías de la imagen.
+
+    Returns
+    -------
+    List[Dict]
+        Lista de diccionarios transformados. Cada elemento contiene:
+
+        - ``"image_url"`` (str): URL pública construida por ``to_image_url()``.
+        - ``"score"`` (float): puntuación redondeada a 4 decimales.
+        - ``"categories"`` (list, opcional): incluido solo si estaba presente
+          en el resultado de entrada.
+
+    Notes
+    -----
+    - La puntuación se redondea a 4 decimales para evitar ruido de punto
+      flotante en la respuesta JSON.
+    - Los separadores de ruta de Windows son normalizados automáticamente
+      por ``to_image_url()``.
     """
     formatted: List[Dict] = []
     for hit in results:

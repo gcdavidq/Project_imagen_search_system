@@ -32,7 +32,53 @@ async def search_image(
     file: UploadFile = File(..., description="Imagen de consulta (JPG/PNG/WebP). Máx 10MB."),
     top_k: int = Form(default=utils.TOP_K_DEFAULT, ge=1, le=50, description="Número de resultados a devolver (1-50)."),
 ) -> SearchResponse:
-    """Retorna las imágenes de la base de datos más similares a una imagen subida."""
+    """
+    Busca imágenes por similitud visual usando una imagen subida como consulta.
+
+    Decodifica la imagen subida, genera su embedding vectorial mediante el
+    encoder visual del modelo CLIP, luego ejecuta una búsqueda por similitud
+    del coseno en PostgreSQL (pgvector) y retorna las ``top_k`` imágenes
+    más similares en orden descendente de relevancia.
+
+    Parameters
+    ----------
+    file : UploadFile
+        Archivo de imagen de consulta (JPG, PNG o WebP). Tamaño máximo
+        permitido: 10 MB (``MAX_UPLOAD_BYTES``). El tipo MIME se valida
+        contra ``utils.ALLOWED_IMAGE_TYPES`` antes de decodificar.
+    top_k : int, opcional
+        Número de resultados a retornar (entre 1 y 50).
+        Por defecto usa ``utils.TOP_K_DEFAULT``.
+
+    Returns
+    -------
+    SearchResponse
+        Respuesta JSON con los campos:
+
+        - ``results`` (List[SearchResult]): lista ordenada de imágenes
+          más similares, cada una con ``image_url``, ``score`` y
+          ``categories`` opcionales.
+        - ``count`` (int): número de resultados retornados.
+        - ``took_ms`` (float): tiempo total de embedding + búsqueda
+          en milisegundos.
+
+    Raises
+    ------
+    HTTPException (503)
+        Si la conexión a PostgreSQL no está lista.
+    HTTPException (400)
+        Si el tipo MIME no es soportado, el archivo está vacío, supera
+        el límite de 10 MB, o los bytes no corresponden a una imagen válida.
+
+    Notes
+    -----
+    - La búsqueda en BD es síncrona; se ejecuta en un hilo separado
+      mediante ``run_in_threadpool`` para no bloquear el event loop.
+    - El ``top_k`` recibido se coerciona al rango ``[1, 50]`` mediante
+      ``max(1, min(top_k, 50))`` para mayor robustez.
+    - El tiempo medido incluye tanto el embedding de la imagen como la
+      consulta vectorial en PostgreSQL.
+    """
     if not indexer.is_ready():
         raise HTTPException(
             status_code=503,
