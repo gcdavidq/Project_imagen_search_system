@@ -1,0 +1,18 @@
+# Blueprint de Render para el frontend estático.
+# Render → New → Blueprint → seleccionar este repositorio.
+# El backend NO se despliega aquí (necesita >2 GB de RAM para CLIP):
+# vive en Hugging Face Spaces; ver README → Despliegue.
+services:
+  - type: web
+    name: image-search-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false   # se define en el dashboard: URL pública del Space
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

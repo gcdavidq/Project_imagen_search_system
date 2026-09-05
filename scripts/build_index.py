@@ -1,3 +1,13 @@
+"""
+build_index.py
+==============
+Genera los embeddings CLIP de todas las imágenes de ``data/images/`` y
+construye el índice vectorial en el backend activo (``INDEX_BACKEND``):
+
+    python scripts/build_index.py                  # backend según .env
+    python scripts/build_index.py --backend faiss  # fuerza índice local offline
+    python scripts/build_index.py --images-dir ruta/a/imagenes --batch-size 64
+"""
 
 from __future__ import annotations
 
@@ -5,77 +15,96 @@ import argparse
 import os
 import sys
 
-# Make the ``backend`` package importable when this script is run directly.
+# Hacer importable el paquete ``backend`` al ejecutar el script directamente.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import numpy as np  
-from PIL import Image 
-from tqdm import tqdm  
 
-from backend import embedder, indexer, utils  
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Construye el índice vectorial a partir de data/images/.")
+    parser.add_argument(
+        "--images-dir", default=None, help="Carpeta con las imágenes (por defecto DATA_DIR/images)."
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["pgvector", "faiss"],
+        default=None,
+        help="Sobrescribe INDEX_BACKEND solo para esta ejecución.",
+    )
+    parser.add_argument("--batch-size", type=int, default=32, help="Imágenes por lote de inferencia.")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Procesa solo las primeras N imágenes (pruebas)."
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build the pgvector index from images in data/images/.")
-    parser.add_argument(
-        "--images-dir",
-        default=utils.IMAGES_DIR,
-        help="Directory containing the dataset images.",
-    )
-    args = parser.parse_args()
+    args = parse_args()
+    if args.backend:
+        # Debe fijarse antes de importar ``backend``, que lee la variable al cargar.
+        os.environ["INDEX_BACKEND"] = args.backend
 
-    images_dir = args.images_dir
-    # OBTENER LA RUTA DE TODAS LAS IMAGENES DE LA CARPETA DATA/IMAGES/
+    import numpy as np
+    from PIL import Image
+    from tqdm import tqdm
+
+    from backend import embedder, indexer, utils
+
+    images_dir = args.images_dir or utils.IMAGES_DIR
     image_paths = utils.list_image_files(images_dir)
+    if args.limit:
+        image_paths = image_paths[: args.limit]
 
     if not image_paths:
-        print(f"[ERROR] No images found in '{images_dir}'.")
-        print("Run 'python scripts/download_dataset.py' first.")
+        print(f"[ERROR] No se encontraron imágenes en '{images_dir}'.")
+        print("Ejecuta primero: python scripts/download_coco.py")
         sys.exit(1)
 
-    print(f"Found {len(image_paths)} images in {images_dir}.")
-    print("Loading CLIP model ...")
-    # PASO 2: Carga el modelo CLIP en la memoria 
+    print(f"Encontradas {len(image_paths)} imágenes en {images_dir}.")
+    print(f"Backend: {indexer.BACKEND} | Modelo: {utils.MODEL_NAME}/{utils.PRETRAINED}")
+    print("Cargando modelo CLIP ...")
     embedder.load_model(utils.MODEL_NAME, utils.PRETRAINED)
 
     embeddings: list[np.ndarray] = []
     kept_paths: list[str] = []
 
-    # Bucle principal. Recorre una por una todas las imágenes encontradas.
-    for rel_path in tqdm(image_paths, desc="Embedding images", unit="img"):
+    batch_images: list[Image.Image] = []
+    batch_paths: list[str] = []
+
+    def flush() -> None:
+        if not batch_images:
+            return
+        vectors = embedder.get_image_embeddings(batch_images)
+        embeddings.extend(vectors)
+        kept_paths.extend(batch_paths)
+        batch_images.clear()
+        batch_paths.clear()
+
+    for rel_path in tqdm(image_paths, desc="Generando embeddings", unit="img"):
         abs_path = os.path.join(images_dir, rel_path)
         try:
             with Image.open(abs_path) as img:
-                image = img.convert("RGB")
-            # CLIP procesa la imagen y devuelve su embedding
-            # (un vector matemático numérico, por ejemplo, de 512 dimensiones).
-            vector = embedder.get_image_embedding(image)
+                batch_images.append(img.convert("RGB"))
+            batch_paths.append(rel_path)
         except Exception as exc:  # noqa: BLE001
-            tqdm.write(f"  skipped {rel_path}: {exc}")
+            tqdm.write(f"  omitida {rel_path}: {exc}")
             continue
-
-        embeddings.append(vector)
-        kept_paths.append(rel_path)
+        if len(batch_images) >= args.batch_size:
+            flush()
+    flush()
 
     if not embeddings:
-        print("[ERROR] No images could be embedded. Aborting.")
+        print("[ERROR] Ninguna imagen pudo procesarse. Abortando.")
         sys.exit(1)
 
-    # PASO 4: CREACIÓN DE LA MATRIZ. 
-    # Apila (junta) todos los vectores individuales en una sola gran matriz bidimensional.
-    # La librería psycopg2 (junto con pgvector) requiere este formato para enviarlo a PostgreSQL.
     matrix = np.vstack(embeddings).astype("float32")
-    print(f"Embedded {matrix.shape[0]} images -> vectors of dimension {matrix.shape[1]}.")
+    print(f"Embeddings generados: {matrix.shape[0]} imágenes × {matrix.shape[1]} dimensiones.")
 
-    # PASO 5: CONSTRUCCIÓN Y GUARDADO DEL ÍNDICE.
-    # Inserta la matriz numérica en la base de datos PostgreSQL alojada en Supabase,
-    # junto con las rutas de las imágenes y las categorías cargadas del metadata.json.
     indexer.build_index(matrix, kept_paths)
 
-    print(f" Index built and uploaded to PostgreSQL with {matrix.shape[0]} images")
-    print("Start the server with: uvicorn backend.main:app --reload --port 8000")
+    print(f"Índice construido en '{indexer.BACKEND}' con {matrix.shape[0]} imágenes.")
+    print("Inicia el servidor con: uvicorn backend.main:app --reload --port 8000")
 
 
 if __name__ == "__main__":

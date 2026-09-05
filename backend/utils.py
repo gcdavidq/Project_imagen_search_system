@@ -1,11 +1,9 @@
 """
 utils.py
 ========
-Configuración centralizada (leída desde el entorno / .env) y pequeños ayudantes
-reutilizables compartidos en el backend: carga de imágenes, validación y
-formateo de respuestas.
-
-
+Configuración centralizada (leída desde el entorno / ``.env``) y ayudantes
+reutilizables compartidos por el backend: carga de imágenes, listado de
+archivos y formateo de respuestas.
 """
 
 from __future__ import annotations
@@ -13,7 +11,6 @@ from __future__ import annotations
 import io
 import logging
 import os
-from typing import List, Dict
 
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
@@ -24,63 +21,76 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Rutas y configuración
+# Rutas
 # --------------------------------------------------------------------------- #
 
-# La raíz del proyecto es el padre del paquete ``backend`` (es decir, image_search_system/).
+# La raíz del proyecto es el padre del paquete ``backend``.
 BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ``DATA_DIR`` se puede sobreescribir a través del entorno; todo lo demás se
-# deriva de él para que el diseño se mantenga consistente.
-DATA_DIR: str = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "data"))
+# ``DATA_DIR`` se puede sobreescribir por entorno; todo lo demás deriva de él.
+DATA_DIR: str = os.getenv("DATA_DIR") or os.path.join(BASE_DIR, "data")
 IMAGES_DIR: str = os.path.join(DATA_DIR, "images")
 EMBEDDINGS_DIR: str = os.path.join(DATA_DIR, "embeddings")
+METADATA_PATH: str = os.path.join(DATA_DIR, "metadata.json")
 
-INDEX_PATH: str = os.path.join(EMBEDDINGS_DIR, "index.faiss")
-PATHS_PATH: str = os.path.join(EMBEDDINGS_DIR, "image_paths.json")
+# Archivos del modo FAISS (offline).
+FAISS_INDEX_PATH: str = os.path.join(EMBEDDINGS_DIR, "index.faiss")
+FAISS_PATHS_PATH: str = os.path.join(EMBEDDINGS_DIR, "image_paths.json")
 
+# --------------------------------------------------------------------------- #
+# Modelo CLIP
+# --------------------------------------------------------------------------- #
 
-# Selección del modelo CLIP multilingüe (OpenCLIP).
-# Modelo: xlm-roberta-base-ViT-B-32, pesos: laion5b_s13b_b90k
-# Soporta búsquedas en múltiples idiomas gracias al encoder de texto multilingüe.
+# Modelo multilingüe (OpenCLIP): torre de texto XLM-RoBERTa + ViT-B/32.
+# Permite consultas en español, inglés y decenas de idiomas más. 512 dims.
 MODEL_NAME: str = os.getenv("MODEL_NAME", "xlm-roberta-base-ViT-B-32")
 PRETRAINED: str = os.getenv("PRETRAINED", "laion5b_s13b_b90k")
+EMBEDDING_DIM: int = 512
 
-# Número predeterminado de resultados devueltos por una búsqueda.
+# --------------------------------------------------------------------------- #
+# Búsqueda
+# --------------------------------------------------------------------------- #
+
+# "pgvector" (PostgreSQL) o "faiss" (índice local en disco).
+INDEX_BACKEND: str = os.getenv("INDEX_BACKEND", "pgvector").strip().lower()
+if INDEX_BACKEND not in {"pgvector", "faiss"}:
+    raise ValueError(
+        f"INDEX_BACKEND='{INDEX_BACKEND}' no es válido. Usa 'pgvector' o 'faiss'."
+    )
+
 TOP_K_DEFAULT: int = int(os.getenv("TOP_K_DEFAULT", "6"))
+TOP_K_MAX: int = 50
 
-# Prefijo de URL pública bajo el cual se sirven las imágenes del conjunto de datos (ver montaje en main.py).
+# Prefijo de URL bajo el cual se sirven las imágenes locales (ver main.py).
 IMAGE_URL_PREFIX: str = "/images"
 
-# Tipos de contenido de imagen permitidos para el endpoint de carga.
+# Tipos MIME aceptados por el endpoint de subida.
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/bmp"}
 
-# Configuración de la base de datos
-SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY: str = os.getenv("SUPABASE_SECRET_KEY", "")
-DB_HOST: str = os.getenv("SUPABASE_DB_HOST", "")
-DB_PORT: str = os.getenv("SUPABASE_DB_PORT", "5432")
-DB_NAME: str = os.getenv("SUPABASE_DB_NAME", "postgres")
-DB_USER: str = os.getenv("SUPABASE_DB_USER", "postgres")
-DB_PASSWORD: str = os.getenv("SUPABASE_DB_PASSWORD", "")
+# --------------------------------------------------------------------------- #
+# Base de datos (solo INDEX_BACKEND=pgvector)
+# --------------------------------------------------------------------------- #
+
+DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
+DB_HOST: str = os.getenv("DB_HOST", "")
+DB_PORT: str = os.getenv("DB_PORT", "5432")
+DB_NAME: str = os.getenv("DB_NAME", "postgres")
+DB_USER: str = os.getenv("DB_USER", "postgres")
+DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+
+# --------------------------------------------------------------------------- #
+# Servidor
+# --------------------------------------------------------------------------- #
+
+CORS_ORIGINS: list[str] = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+] or ["*"]
 
 
 def ensure_dirs() -> None:
-    """
-    Crea los directorios de datos del proyecto si aún no existen.
-
-    Crea de forma recursiva (``os.makedirs(..., exist_ok=True)``) los
-    directorios ``IMAGES_DIR`` y ``EMBEDDINGS_DIR`` definidos en este módulo.
-    No hace nada si los directorios ya existen.
-
-    Parameters
-    ----------
-    Ninguno.
-
-    Returns
-    -------
-    None
-    """
+    """Crea los directorios de datos (imágenes e índices) si no existen."""
     os.makedirs(IMAGES_DIR, exist_ok=True)
     os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 
@@ -91,70 +101,32 @@ def ensure_dirs() -> None:
 
 def load_image_from_bytes(data: bytes) -> Image.Image:
     """
-    Decodifica bytes crudos en una imagen RGB ``PIL.Image.Image``.
+    Decodifica bytes crudos en una imagen ``PIL.Image`` en modo RGB.
 
-    Abre la imagen desde el buffer de bytes, fuerza la decodificación
-    completa (para detectar archivos corruptos de inmediato) y convierte
-    el resultado al modo ``RGB`` para compatibilidad con el preprocesador CLIP.
-
-    Parameters
-    ----------
-    data : bytes
-        Contenido binario de un archivo de imagen (JPG, PNG, WebP, BMP, etc.).
-        Obtenido típicamente de ``await upload_file.read()`` en FastAPI.
-
-    Returns
-    -------
-    PIL.Image.Image
-        Imagen decodificada en modo ``RGB``, lista para ser pasada al
-        preprocesador de CLIP (``embedder.get_image_embedding``).
+    Fuerza la decodificación completa para que los archivos corruptos fallen
+    de inmediato en lugar de hacerlo dentro del modelo.
 
     Raises
     ------
     ValueError
-        Si los bytes no contienen una imagen válida o decodificable
-        (archivo corrupto, formato no soportado, bytes truncados, etc.).
-        Envuelve la excepción original de Pillow como causa.
+        Si los bytes no corresponden a una imagen válida.
     """
     try:
         image = Image.open(io.BytesIO(data))
-        # ``load`` fuerza la decodificación para que los archivos malformados fallen aquí en lugar de más tarde.
         image.load()
         return image.convert("RGB")
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise ValueError("El archivo subido no es una imagen válida.") from exc
 
 
-def list_image_files(directory: str) -> List[str]:
+def list_image_files(directory: str) -> list[str]:
     """
-    Lista recursivamente todos los archivos de imagen dentro de un directorio.
+    Lista recursivamente los archivos de imagen de ``directory``.
 
-    Recorre el árbol de directorios con ``os.walk`` y filtra los archivos
-    cuya extensión sea ``.jpg``, ``.jpeg``, ``.png``, ``.webp`` o ``.bmp``.
-    Los resultados se devuelven como rutas relativas al directorio raíz,
-    ordenadas alfabéticamente.
-
-    Parameters
-    ----------
-    directory : str
-        Ruta absoluta o relativa al directorio raíz donde buscar imágenes.
-        Generalmente es ``utils.IMAGES_DIR``.
-
-    Returns
-    -------
-    List[str]
-        Lista ordenada de rutas relativas (respecto a ``directory``) de
-        todos los archivos de imagen encontrados. Puede ser lista vacía
-        si no se encuentra ninguna imagen.
-
-    Notes
-    -----
-    - La búsqueda es **recursiva**: incluye imágenes en subdirectorios.
-    - La comparación de extensiones es insensible a mayúsculas/minúsculas
-      (usa ``.lower()``).
+    Devuelve rutas relativas al directorio, ordenadas alfabéticamente.
     """
     exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-    found: List[str] = []
+    found: list[str] = []
     for root, _dirs, files in os.walk(directory):
         for name in files:
             if os.path.splitext(name)[1].lower() in exts:
@@ -165,76 +137,62 @@ def list_image_files(directory: str) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Metadatos del dataset
+# --------------------------------------------------------------------------- #
+
+def load_metadata() -> dict[str, dict]:
+    """
+    Lee ``metadata.json`` y lo normaliza a ``{nombre_archivo: {"categories": [...], "url": str}}``.
+
+    Acepta también el formato antiguo ``{nombre_archivo: ["cat", ...]}`` para
+    mantener compatibilidad con datasets descargados con versiones previas.
+    Devuelve un diccionario vacío si el archivo no existe.
+    """
+    if not os.path.exists(METADATA_PATH):
+        return {}
+    import json
+
+    with open(METADATA_PATH, encoding="utf-8") as handle:
+        raw = json.load(handle)
+
+    normalised: dict[str, dict] = {}
+    for filename, value in raw.items():
+        if isinstance(value, list):
+            normalised[filename] = {"categories": value, "url": ""}
+        elif isinstance(value, dict):
+            normalised[filename] = {
+                "categories": list(value.get("categories", [])),
+                "url": value.get("url", "") or "",
+            }
+    return normalised
+
+
+# --------------------------------------------------------------------------- #
 # Formateo de respuestas
 # --------------------------------------------------------------------------- #
 
 def to_image_url(relative_path: str) -> str:
-    """
-    Convierte una ruta relativa de imagen en una URL pública servida por la API.
-
-    Combina el prefijo de URL configurado (``IMAGE_URL_PREFIX``, por defecto
-    ``/images``) con la ruta relativa normalizada (separadores de Windows
-    convertidos a ``/``).
-
-    Parameters
-    ----------
-    relative_path : str
-        Ruta del archivo relativa a ``IMAGES_DIR``.
-        Ejemplo: ``"gatos\\siames.jpg"`` (Windows) o ``"gatos/siames.jpg"``.
-
-    Returns
-    -------
-    str
-        URL pública de la imagen lista para incrustar en respuestas JSON.
-        Ejemplo: ``"/images/gatos/siames.jpg"``.
-    """
-    # Normalizar los separadores de Windows para que las URLs estén siempre basadas en barras diagonales.
+    """Convierte una ruta relativa local en la URL pública servida por la API."""
     clean = relative_path.replace(os.sep, "/").lstrip("/")
     return f"{IMAGE_URL_PREFIX}/{clean}"
 
 
-def format_results(results: List[Dict]) -> List[Dict]:
+def format_results(results: list[dict]) -> list[dict]:
     """
-    Transforma la lista de resultados crudos del indexador al formato de respuesta de la API.
+    Transforma los resultados crudos del indexador al esquema de la API.
 
-    Convierte cada entrada del indexador (que usa rutas de archivo locales)
-    en un diccionario con URLs públicas y puntuaciones redondeadas,
-    compatible con el esquema Pydantic ``SearchResult`` del frontend.
-
-    Parameters
-    ----------
-    results : List[Dict]
-        Lista de diccionarios retornados por ``indexer.search()``. Cada
-        elemento debe contener al menos:
-
-        - ``"image_path"`` (str): ruta relativa de la imagen en ``IMAGES_DIR``.
-        - ``"score"`` (float): puntuación de similitud del coseno.
-        - ``"categories"`` (list, opcional): categorías de la imagen.
-
-    Returns
-    -------
-    List[Dict]
-        Lista de diccionarios transformados. Cada elemento contiene:
-
-        - ``"image_url"`` (str): URL pública construida por ``to_image_url()``.
-        - ``"score"`` (float): puntuación redondeada a 4 decimales.
-        - ``"categories"`` (list, opcional): incluido solo si estaba presente
-          en el resultado de entrada.
-
-    Notes
-    -----
-    - La puntuación se redondea a 4 decimales para evitar ruido de punto
-      flotante en la respuesta JSON.
-    - Los separadores de ruta de Windows son normalizados automáticamente
-      por ``to_image_url()``.
+    Cada entrada de ``results`` trae ``image_path``, ``score``, ``categories``
+    y opcionalmente ``image_url`` (URL pública externa, p.ej. el CDN de COCO).
+    Si existe URL pública se prefiere; si no, se construye la URL local.
     """
-    formatted: List[Dict] = []
+    formatted: list[dict] = []
     for hit in results:
-        formatted_hit = {
-            "image_url": to_image_url(hit["image_path"]),
-            "score": round(float(hit["score"]), 4),
-        }
-        if "categories" in hit:
-            formatted_hit["categories"] = hit["categories"]
-        formatted.append(formatted_hit)
+        public_url = (hit.get("image_url") or "").strip()
+        formatted.append(
+            {
+                "image_url": public_url or to_image_url(hit["image_path"]),
+                "score": round(float(hit["score"]), 4),
+                "categories": list(hit.get("categories") or []),
+            }
+        )
     return formatted

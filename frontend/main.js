@@ -1,32 +1,32 @@
-import './style.css';
+import "./style.css";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// URL base de la API. En desarrollo apunta al backend local; en producción se
+// define VITE_API_URL en el build (ver frontend/.env.example).
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
 
 (() => {
   "use strict";
 
-  const TOP_K = 6;
-
-  // ---------------------------------------------------------------------- //
-  // Tiny DOM helpers
-  // ---------------------------------------------------------------------- //
   const $ = (sel, root = document) => root.querySelector(sel);
 
-  const ICONS = {
-    image:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.6-3.6a2 2 0 0 0-2.8 0L6 20"/></svg>',
-    search:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
-    alert:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
-    empty:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg>',
-  };
+  // Formato de números en español (7 843 → "7843" con separador local).
+  const nf = new Intl.NumberFormat("es");
 
   // ---------------------------------------------------------------------- //
-  // Shared result rendering
+  // Estado compartido
   // ---------------------------------------------------------------------- //
+  const state = {
+    mode: "text",
+    topK: 6,
+    backendReady: false,
+  };
+
   const els = {
+    status: $("#status"),
+    statusText: $("#status-text"),
+    topK: $("#top-k"),
+    tabs: [...document.querySelectorAll('.tab[role="tab"]')],
+    modes: { text: $("#mode-text"), image: $("#mode-image") },
     grid: $("#results-grid"),
     head: $("#results-head"),
     title: $("#results-title"),
@@ -34,21 +34,110 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     empty: $("#state-empty"),
     error: $("#state-error"),
     errorText: $("#state-error-text"),
+    footerStats: $("#footer-stats"),
+    docsLink: $("#docs-link"),
   };
 
+  // ---------------------------------------------------------------------- //
+  // Estado del backend (/health)
+  // ---------------------------------------------------------------------- //
+  function setStatus(kind, text) {
+    els.status.dataset.state = kind;
+    els.statusText.textContent = text;
+  }
+
+  async function checkHealth() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const health = await response.json();
+
+      if (health.model_loaded && health.index_loaded && health.index_size > 0) {
+        state.backendReady = true;
+        setStatus("ok", `En línea · ${nf.format(health.index_size)} imágenes · ${health.backend}`);
+        return true;
+      }
+      if (!health.index_loaded) {
+        setStatus("warn", "Servidor en línea, pero el índice no está construido");
+        return false;
+      }
+      setStatus("loading", "Cargando el modelo CLIP…");
+      return false;
+    } catch (_err) {
+      // En Hugging Face Spaces el contenedor puede tardar 1-2 min en despertar.
+      setStatus("loading", "Despertando el servidor… puede tardar un minuto");
+      return false;
+    }
+  }
+
+  async function loadStats() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/stats`);
+      if (!response.ok) return;
+      const stats = await response.json();
+      if (stats.total_images > 0) {
+        els.footerStats.textContent =
+          `${nf.format(stats.total_images)} imágenes de MS COCO en ${nf.format(stats.categories.length)} categorías`;
+      }
+    } catch (_err) {
+      /* opcional */
+    }
+  }
+
+  function startHealthPolling() {
+    let attempts = 0;
+    const tick = async () => {
+      const ready = await checkHealth();
+      if (ready) {
+        loadStats();
+        return;
+      }
+      attempts += 1;
+      // Reintenta con espera creciente hasta ~5 minutos (arranque en frío).
+      const delay = Math.min(15000, 2000 + attempts * 1000);
+      if (attempts < 40) setTimeout(tick, delay);
+    };
+    tick();
+  }
+
+  // ---------------------------------------------------------------------- //
+  // Pestañas de modo
+  // ---------------------------------------------------------------------- //
+  function setMode(mode) {
+    state.mode = mode;
+    els.tabs.forEach((tab) => {
+      const active = tab.dataset.mode === mode;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    Object.entries(els.modes).forEach(([key, panel]) => {
+      panel.hidden = key !== mode;
+    });
+    if (mode === "text") $("#text-query").focus();
+  }
+
+  els.tabs.forEach((tab) => tab.addEventListener("click", () => setMode(tab.dataset.mode)));
+
+  els.topK.addEventListener("change", () => {
+    state.topK = Number(els.topK.value) || 6;
+  });
+
+  // ---------------------------------------------------------------------- //
+  // Render de resultados
+  // ---------------------------------------------------------------------- //
   function hideStates() {
-    els.empty && els.empty.classList.remove("is-visible");
-    els.error && els.error.classList.remove("is-visible");
+    els.empty.classList.remove("is-visible");
+    els.error.classList.remove("is-visible");
   }
 
   function clearGrid() {
-    if (els.grid) els.grid.innerHTML = "";
+    els.grid.innerHTML = "";
   }
 
-  function showSkeletons(n = TOP_K) {
+  function showSkeletons(n = state.topK) {
     hideStates();
     clearGrid();
-    if (els.head) els.head.style.visibility = "hidden";
+    els.head.style.visibility = "hidden";
     const frag = document.createDocumentFragment();
     for (let i = 0; i < n; i += 1) {
       const sk = document.createElement("div");
@@ -60,21 +149,25 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
   function showError(message) {
     clearGrid();
-    if (els.head) els.head.style.visibility = "hidden";
-    if (els.errorText) els.errorText.textContent = message;
-    if (els.error) els.error.classList.add("is-visible");
+    els.head.style.visibility = "hidden";
+    els.errorText.textContent = message;
+    els.error.classList.add("is-visible");
   }
 
   function showEmpty() {
     clearGrid();
-    if (els.head) els.head.style.visibility = "hidden";
-    if (els.empty) els.empty.classList.add("is-visible");
+    els.head.style.visibility = "hidden";
+    els.empty.classList.add("is-visible");
   }
 
   function pct(score) {
-    // CLIP cosine similarity is in [-1, 1]; clamp to [0, 1] for display.
+    // La similitud coseno de CLIP cae en [-1, 1]; se recorta a [0, 1] para mostrar.
     const clamped = Math.max(0, Math.min(1, score));
     return `${(clamped * 100).toFixed(1)}%`;
+  }
+
+  function resolveImageUrl(url) {
+    return /^https?:\/\//i.test(url) ? url : API_BASE_URL + url;
   }
 
   function renderResults(payload, label) {
@@ -87,12 +180,10 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       return;
     }
 
-    if (els.head) els.head.style.visibility = "visible";
-    if (els.title) els.title.textContent = label;
-    if (els.meta) {
-      const took = payload.took_ms != null ? ` · ${payload.took_ms} ms` : "";
-      els.meta.textContent = `${results.length} matches${took}`;
-    }
+    els.head.style.visibility = "visible";
+    els.title.textContent = label;
+    const took = payload.took_ms != null ? ` · ${nf.format(payload.took_ms)} ms` : "";
+    els.meta.textContent = `${results.length} resultados${took}`;
 
     const frag = document.createDocumentFragment();
     results.forEach((item, i) => {
@@ -103,15 +194,39 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
       const img = document.createElement("img");
       img.loading = "lazy";
-      img.src = item.image_url.startsWith('http') ? item.image_url : API_BASE_URL + item.image_url;
-      img.alt = `Result ${i + 1} — similarity ${pct(item.score)}`;
+      img.decoding = "async";
+      img.src = resolveImageUrl(item.image_url);
+      const cats = (item.categories || []).join(", ");
+      img.alt = cats ? `${cats} — similitud ${pct(item.score)}` : `Resultado ${i + 1} — similitud ${pct(item.score)}`;
       img.addEventListener("error", () => {
-        card.style.display = "none"; // hide broken images gracefully
+        card.style.display = "none"; // oculta imágenes rotas sin dejar huecos
       });
 
       const overlay = document.createElement("figcaption");
       overlay.className = "card__overlay";
-      overlay.innerHTML = `<span class="score">${pct(item.score)}</span>`;
+
+      const score = document.createElement("span");
+      score.className = "score";
+      score.textContent = pct(item.score);
+      overlay.appendChild(score);
+
+      if (item.categories && item.categories.length) {
+        const list = document.createElement("span");
+        list.className = "card__cats";
+        item.categories.slice(0, 3).forEach((name) => {
+          const tag = document.createElement("span");
+          tag.className = "cat";
+          tag.textContent = name;
+          list.appendChild(tag);
+        });
+        if (item.categories.length > 3) {
+          const more = document.createElement("span");
+          more.className = "cat cat--more";
+          more.textContent = `+${item.categories.length - 3}`;
+          list.appendChild(more);
+        }
+        overlay.appendChild(list);
+      }
 
       card.append(img, overlay);
       frag.appendChild(card);
@@ -119,29 +234,30 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     els.grid.appendChild(frag);
   }
 
-  // Convert an HTTP error response into a readable message.
   async function describeError(response) {
     try {
       const data = await response.json();
       if (data && data.detail) {
-        return typeof data.detail === "string"
-          ? data.detail
-          : JSON.stringify(data.detail);
+        return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
       }
     } catch (_) {
-      /* not JSON */
+      /* no es JSON */
     }
     if (response.status === 503) {
-      return "The search index isn't loaded yet. Build it with scripts/build_index.py and restart the server.";
+      return "El índice de búsqueda todavía no está listo. Inténtalo en unos segundos.";
     }
-    return `Request failed (HTTP ${response.status}).`;
+    return `La petición falló (HTTP ${response.status}).`;
   }
 
+  const NETWORK_ERROR =
+    "No se pudo conectar con el servidor. Si el demo lleva un rato inactivo, espera a que despierte y vuelve a intentar.";
 
+  // ---------------------------------------------------------------------- //
+  // Modo: texto
+  // ---------------------------------------------------------------------- //
   function initTextSearch() {
     const input = $("#text-query");
     const button = $("#text-search-btn");
-    if (!input || !button) return;
 
     async function run() {
       const query = input.value.trim();
@@ -157,18 +273,17 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
         const response = await fetch(`${API_BASE_URL}/search/text`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, top_k: TOP_K }),
+          body: JSON.stringify({ query, top_k: state.topK }),
         });
 
         if (!response.ok) {
           showError(await describeError(response));
           return;
         }
-
-        const data = await response.json();
-        renderResults(data, `Results for “${query}”`);
-      } catch (err) {
-        showError("Couldn't reach the server. Is it running on this address?");
+        renderResults(await response.json(), `Resultados para “${query}”`);
+      } catch (_err) {
+        showError(NETWORK_ERROR);
+        checkHealth();
       } finally {
         button.disabled = false;
       }
@@ -179,19 +294,16 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       if (e.key === "Enter") run();
     });
 
-    // Example chips fill the box and search immediately.
     document.querySelectorAll("[data-example]").forEach((chip) => {
       chip.addEventListener("click", () => {
         input.value = chip.getAttribute("data-example") || chip.textContent.trim();
         run();
       });
     });
-
-    input.focus();
   }
 
   // ---------------------------------------------------------------------- //
-  // Page: IMAGE SEARCH
+  // Modo: imagen
   // ---------------------------------------------------------------------- //
   function initImageSearch() {
     const dropzone = $("#dropzone");
@@ -202,8 +314,8 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     const previewSize = $("#preview-size");
     const searchBtn = $("#image-search-btn");
     const resetBtn = $("#reset-btn");
-    if (!dropzone || !fileInput) return;
 
+    const MAX_BYTES = 10 * 1024 * 1024;
     let currentFile = null;
 
     function humanSize(bytes) {
@@ -215,7 +327,11 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     function setFile(file) {
       if (!file) return;
       if (!file.type.startsWith("image/")) {
-        showError("That file isn't an image. Choose a JPG, PNG or WebP.");
+        showError("Ese archivo no es una imagen. Elige un JPG, PNG o WebP.");
+        return;
+      }
+      if (file.size > MAX_BYTES) {
+        showError("La imagen supera los 10 MB. Elige una más ligera.");
         return;
       }
       currentFile = file;
@@ -226,10 +342,10 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       };
       reader.readAsDataURL(file);
 
-      previewName.textContent = file.name;
+      previewName.textContent = file.name || "imagen del portapapeles";
       previewSize.textContent = humanSize(file.size);
       preview.classList.add("is-visible");
-      dropzone.style.display = "none";
+      dropzone.hidden = true;
       hideStates();
     }
 
@@ -238,10 +354,10 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       fileInput.value = "";
       previewImg.removeAttribute("src");
       preview.classList.remove("is-visible");
-      dropzone.style.display = "";
+      dropzone.hidden = false;
       clearGrid();
       hideStates();
-      if (els.head) els.head.style.visibility = "hidden";
+      els.head.style.visibility = "hidden";
     }
 
     async function run() {
@@ -251,27 +367,24 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       showSkeletons();
 
       const form = new FormData();
-      form.append("file", currentFile);
-      form.append("top_k", String(TOP_K));
+      form.append("file", currentFile, currentFile.name || "consulta.png");
+      form.append("top_k", String(state.topK));
 
       try {
         const response = await fetch(`${API_BASE_URL}/search/image`, { method: "POST", body: form });
-
         if (!response.ok) {
           showError(await describeError(response));
           return;
         }
-
-        const data = await response.json();
-        renderResults(data, "Visually similar images");
-      } catch (err) {
-        showError("Couldn't reach the server. Is it running on this address?");
+        renderResults(await response.json(), "Imágenes visualmente similares");
+      } catch (_err) {
+        showError(NETWORK_ERROR);
+        checkHealth();
       } finally {
         searchBtn.disabled = false;
       }
     }
 
-    // Click-to-open and file picker.
     dropzone.addEventListener("click", () => fileInput.click());
     dropzone.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -281,7 +394,6 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     });
     fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
 
-    // Drag & drop.
     ["dragenter", "dragover"].forEach((evt) =>
       dropzone.addEventListener(evt, (e) => {
         e.preventDefault();
@@ -296,15 +408,19 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     );
     dropzone.addEventListener("drop", (e) => {
       const file = e.dataTransfer && e.dataTransfer.files[0];
-      if (file) setFile(file);
+      if (file) {
+        setMode("image");
+        setFile(file);
+      }
     });
 
-    // Allow pasting an image straight from the clipboard.
+    // Pegar una imagen desde el portapapeles activa el modo imagen.
     window.addEventListener("paste", (e) => {
-      const item = [...(e.clipboardData?.items || [])].find((it) =>
-        it.type.startsWith("image/")
-      );
-      if (item) setFile(item.getAsFile());
+      const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
+      if (item) {
+        setMode("image");
+        setFile(item.getAsFile());
+      }
     });
 
     searchBtn.addEventListener("click", run);
@@ -312,11 +428,13 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
   }
 
   // ---------------------------------------------------------------------- //
-  // Boot
+  // Arranque
   // ---------------------------------------------------------------------- //
   document.addEventListener("DOMContentLoaded", () => {
-    const page = document.body.getAttribute("data-page");
-    if (page === "text") initTextSearch();
-    if (page === "image") initImageSearch();
+    els.docsLink.href = `${API_BASE_URL}/docs`;
+    initTextSearch();
+    initImageSearch();
+    setMode("text");
+    startHealthPolling();
   });
 })();

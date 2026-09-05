@@ -1,21 +1,25 @@
+"""
+main.py
+=======
+Aplicación FastAPI: ciclo de vida (carga del modelo CLIP y del índice),
+CORS, imágenes estáticas locales, endpoints de estado y montaje de rutas.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import embedder, indexer, utils
+from . import __version__, embedder, indexer, utils
 from .routes import image_search, text_search
+from .schemas import HealthResponse, StatsResponse
 
-# --------------------------------------------------------------------------- #
-# Logging
-# --------------------------------------------------------------------------- #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -23,163 +27,109 @@ logging.basicConfig(
 logger = logging.getLogger("image_search")
 
 
-# --------------------------------------------------------------------------- #
-# Lifespan: load heavy resources once
-# --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Gestiona el ciclo de vida de la aplicación FastAPI (startup y shutdown).
+    Carga los recursos pesados una sola vez al arrancar.
 
-    Al **inicio** (startup):
-    1. Crea los directorios de datos necesarios (``utils.ensure_dirs()``).
-    2. Carga el modelo CLIP en memoria (``embedder.load_model()``).
-    3. Inicializa el índice de búsqueda / conexión a PostgreSQL
-       (``indexer.load_index()``). Si falla, el servidor sigue arrancando
-       en modo degradado y los endpoints de búsqueda retornan HTTP 503
-       hasta que el índice sea construido manualmente.
-
-    Al **cierre** (shutdown): registra el evento en el logger.
-
-    Parameters
-    ----------
-    app : fastapi.FastAPI
-        Instancia de la aplicación FastAPI inyectada automáticamente por
-        el framework al registrar el lifespan.
-
-    Yields
-    ------
-    None
-        Punto de suspensión entre startup y shutdown; la aplicación
-        atiende requests mientras está suspendida aquí.
-
-    Notes
-    -----
-    - Debe registrarse como ``lifespan=lifespan`` en el constructor de
-      ``FastAPI()``, no como evento ``@app.on_event`` (patrón moderno).
-    - Los errores de ``indexer.load_index()`` se capturan y logean como
-      advertencia para permitir que el servidor inicie de todas formas.
+    1. Crea los directorios de datos.
+    2. Carga el modelo CLIP en memoria (obligatorio).
+    3. Inicializa el backend vectorial. Si falla, el servidor arranca igual en
+       modo degradado y los endpoints de búsqueda responden HTTP 503.
     """
-    logger.info("Starting up: loading CLIP model and DB connection ...")
+    logger.info("Arrancando: modelo CLIP '%s' + backend '%s' ...", utils.MODEL_NAME, indexer.BACKEND)
     utils.ensure_dirs()
 
-    # 1) CLIP model -- always required.
-    embedder.load_model(utils.MODEL_NAME, utils.PRETRAINED)
+    await run_in_threadpool(embedder.load_model, utils.MODEL_NAME, utils.PRETRAINED)
 
-    # 2) DB connection -- optional at boot. The server still starts so that the
-    #    pages render and return a clean 503 until the index is built.
     try:
-        indexer.load_index()
-    except Exception as e:
+        await run_in_threadpool(indexer.load_index)
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            f"Database not fully initialized. Search endpoints will return HTTP 503 until "
-            f"you run 'python scripts/build_index.py' and restart. Detail: {e}"
+            "Índice no disponible; las búsquedas responderán 503 hasta ejecutar "
+            "'python scripts/build_index.py' y reiniciar. Detalle: %s",
+            exc,
         )
 
     yield
 
-    logger.info("Shutting down.")
+    if indexer.BACKEND == "pgvector":
+        from .database import close_pool
 
+        close_pool()
+    logger.info("Servidor detenido.")
 
 
 tags_metadata = [
-    {
-        "name": "search",
-        "description": "Operaciones de búsqueda multimodal (Texto e Imagen).",
-    }
+    {"name": "search", "description": "Búsqueda multimodal: texto → imagen e imagen → imagen."},
+    {"name": "system", "description": "Estado del servicio y estadísticas del índice."},
 ]
 
 app = FastAPI(
-    title="Multimodal Image Search API",
-    description="Motor de búsqueda de imágenes texto-a-imagen e imagen-a-imagen alimentado por CLIP y PostgreSQL (pgvector).",
-    version="2.0.0",
+    title="Buscador Multimodal de Imágenes",
+    description=(
+        "Búsqueda texto → imagen e imagen → imagen con CLIP multilingüe "
+        "y PostgreSQL (pgvector) o FAISS."
+    ),
+    version=__version__,
     openapi_tags=tags_metadata,
-    contact={
-        "name": "Soporte API",
-        "url": "http://localhost:8000",
-    },
     lifespan=lifespan,
 )
 
-# CORS 
+# Con "*" no se pueden enviar credenciales (restricción del estándar CORS).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=utils.CORS_ORIGINS,
+    allow_credentials="*" not in utils.CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-
+# Imágenes locales del dataset (solo se usan si no hay URLs públicas).
 app.mount(
     utils.IMAGE_URL_PREFIX,
     StaticFiles(directory=utils.IMAGES_DIR, check_dir=False),
     name="images",
 )
 
-#Rutas
 app.include_router(text_search.router)
 app.include_router(image_search.router)
 
 
-@app.get("/health")
-async def health():
-    """
-    Endpoint de verificación de estado (health check) del servidor.
-
-    Retorna el estado operativo de los componentes críticos:
-    modelo CLIP e indexador de búsqueda. Útil para monitoreo,
-    load balancers y scripts de despliegue.
-
-    Parameters
-    ----------
-    Ninguno.
-
-    Returns
-    -------
-    dict
-        Diccionario JSON con las siguientes claves:
-
-        - ``"status"`` (str): siempre ``"ok"`` si el servidor está corriendo.
-        - ``"model_loaded"`` (bool): ``True`` si el modelo CLIP está en memoria.
-        - ``"index_loaded"`` (bool): ``True`` si el indexador/BD está listo.
-        - ``"index_size"`` (int): número de imágenes indexadas actualmente.
-    """
+@app.get("/", tags=["system"], include_in_schema=False)
+async def root():
     return {
-        "status": "ok",
-        "model_loaded": embedder.is_ready(),
-        "index_loaded": indexer.is_ready(),
-        "index_size": indexer.index_size(),
+        "name": app.title,
+        "version": __version__,
+        "docs": "/docs",
+        "health": "/health",
     }
 
 
-# --------------------------------------------------------------------------- #
-# Error handling
-# --------------------------------------------------------------------------- #
+@app.get("/health", response_model=HealthResponse, tags=["system"], summary="Estado del servicio")
+async def health() -> HealthResponse:
+    """Indica si el modelo CLIP y el índice vectorial están listos."""
+    size = await run_in_threadpool(indexer.index_size)
+    return HealthResponse(
+        status="ok",
+        version=__version__,
+        backend=indexer.BACKEND,
+        model=f"{utils.MODEL_NAME}/{utils.PRETRAINED}",
+        model_loaded=embedder.is_ready(),
+        index_loaded=indexer.is_ready(),
+        index_size=size,
+    )
+
+
+@app.get("/stats", response_model=StatsResponse, tags=["system"], summary="Estadísticas del índice")
+async def stats() -> StatsResponse:
+    """Total de imágenes indexadas y conteo por categoría MS COCO."""
+    data = await run_in_threadpool(indexer.stats)
+    return StatsResponse(**data)
+
+
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(_request: Request, exc: RuntimeError):
-    """
-    Manejador global de excepciones ``RuntimeError`` para toda la aplicación.
-
-    Convierte errores de tiempo de ejecución no capturados (principalmente
-    el lanzado por ``indexer.search()`` cuando la BD no está lista) en
-    respuestas HTTP 503 con un mensaje descriptivo en el cuerpo JSON.
-
-    Parameters
-    ----------
-    _request : fastapi.Request
-        Objeto de la petición HTTP que desencadenó el error. No se utiliza
-        directamente, pero es requerido por la firma del handler de FastAPI.
-    exc : RuntimeError
-        Instancia de la excepción capturada. Su mensaje (``str(exc)``) se
-        incluye en el campo ``"detail"`` de la respuesta JSON.
-
-    Returns
-    -------
-    fastapi.responses.JSONResponse
-        Respuesta HTTP con:
-        - Código de estado: ``503 Service Unavailable``.
-        - Cuerpo: ``{"detail": "<mensaje del error>"}``.
-    """
+    """Convierte errores de infraestructura (índice no listo, BD caída) en HTTP 503."""
     logger.error("Runtime error: %s", exc)
     return JSONResponse(status_code=503, content={"detail": str(exc)})
