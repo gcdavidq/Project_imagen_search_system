@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-label="Buscador Multimodal de Imágenes: texto o imagen → CLIP → vector 512-d → pgvector → resultados">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#15151c"/>
+      <stop offset="1" stop-color="#0f0f13"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0" r="0.8">
+      <stop offset="0" stop-color="#6c63ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#6c63ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6c63ff"/>
+      <stop offset="1" stop-color="#9b7bff"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6c63ff" stop-opacity="0.2"/>
+      <stop offset="0.5" stop-color="#9b7bff"/>
+      <stop offset="1" stop-color="#6c63ff" stop-opacity="0.2"/>
+    </linearGradient>
+    <style>
+      .t  { font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .m  { font-family: "JetBrains Mono", "SF Mono", Consolas, Menlo, monospace; }
+      .h1 { font-size: 44px; font-weight: 700; fill: #ececf1; letter-spacing: -0.5px; }
+      .h2 { font-size: 18px; fill: #a3a3b0; }
+      .lab { font-size: 15px; font-weight: 600; fill: #ececf1; }
+      .sub { font-size: 12px; fill: #8a8a99; }
+      .tag { font-size: 12px; font-weight: 600; fill: #fff; }
+      .box { fill: #1a1a22; stroke: #2a2a36; stroke-width: 1.5; }
+      .hot { fill: #1c1a2e; stroke: #6c63ff; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="340" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="340" rx="24" fill="url(#glow)"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="338.5" rx="23.5" fill="none" stroke="#2a2a36"/>
+
+  <!-- Marca -->
+  <rect x="56" y="52" width="46" height="46" rx="13" fill="url(#accent)"/>
+  <g transform="translate(66 62)" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11.5" cy="11.5" r="7"/>
+    <path d="m24 24-5-5"/>
+  </g>
+  <text x="118" y="86" class="t h1">Buscador Multimodal de Imágenes</text>
+  <text x="118" y="116" class="t h2">Texto → imagen e imagen → imagen con CLIP multilingüe + PostgreSQL pgvector</text>
+
+  <!-- Badges -->
+  <g class="t tag">
+    <rect x="118" y="134" width="96" height="24" rx="12" fill="#6c63ff" fill-opacity="0.22" stroke="#6c63ff" stroke-opacity="0.5"/>
+    <text x="166" y="150" text-anchor="middle">FastAPI</text>
+    <rect x="222" y="134" width="120" height="24" rx="12" fill="#6c63ff" fill-opacity="0.22" stroke="#6c63ff" stroke-opacity="0.5"/>
+    <text x="282" y="150" text-anchor="middle">open_clip · CLIP</text>
+    <rect x="350" y="134" width="94" height="24" rx="12" fill="#6c63ff" fill-opacity="0.22" stroke="#6c63ff" stroke-opacity="0.5"/>
+    <text x="397" y="150" text-anchor="middle">pgvector</text>
+    <rect x="452" y="134" width="70" height="24" rx="12" fill="#6c63ff" fill-opacity="0.22" stroke="#6c63ff" stroke-opacity="0.5"/>
+    <text x="487" y="150" text-anchor="middle">FAISS</text>
+    <rect x="530" y="134" width="60" height="24" rx="12" fill="#6c63ff" fill-opacity="0.22" stroke="#6c63ff" stroke-opacity="0.5"/>
+    <text x="560" y="150" text-anchor="middle">Vite</text>
+    <rect x="598" y="134" width="96" height="24" rx="12" fill="#45d9a4" fill-opacity="0.16" stroke="#45d9a4" stroke-opacity="0.5"/>
+    <text x="646" y="150" text-anchor="middle" fill="#45d9a4">MS COCO</text>
+  </g>
+
+  <!-- Pipeline -->
+  <line x1="56" y1="252" x2="1144" y2="252" stroke="url(#line)" stroke-width="2"/>
+
+  <!-- 1. entrada -->
+  <rect x="56" y="214" width="200" height="76" rx="14" class="box"/>
+  <text x="156" y="245" text-anchor="middle" class="t lab">"un gato durmiendo"</text>
+  <text x="156" y="268" text-anchor="middle" class="t sub">o una foto de consulta</text>
+
+  <!-- 2. CLIP -->
+  <rect x="300" y="214" width="200" height="76" rx="14" class="hot"/>
+  <text x="400" y="245" text-anchor="middle" class="t lab">CLIP multilingüe</text>
+  <text x="400" y="268" text-anchor="middle" class="m sub">xlm-roberta-base-ViT-B-32</text>
+
+  <!-- 3. vector -->
+  <rect x="544" y="214" width="180" height="76" rx="14" class="box"/>
+  <text x="634" y="245" text-anchor="middle" class="m lab">[0.02, -0.11, …]</text>
+  <text x="634" y="268" text-anchor="middle" class="t sub">vector 512-d · L2</text>
+
+  <!-- 4. índice -->
+  <rect x="768" y="214" width="200" height="76" rx="14" class="hot"/>
+  <text x="868" y="245" text-anchor="middle" class="t lab">pgvector · HNSW</text>
+  <text x="868" y="268" text-anchor="middle" class="t sub">similitud coseno  ·  o FAISS offline</text>
+
+  <!-- 5. resultados -->
+  <g transform="translate(1012 214)">
+    <rect width="132" height="76" rx="14" class="box"/>
+    <rect x="12" y="14" width="30" height="30" rx="6" fill="#6c63ff" fill-opacity="0.55"/>
+    <rect x="51" y="14" width="30" height="30" rx="6" fill="#6c63ff" fill-opacity="0.4"/>
+    <rect x="90" y="14" width="30" height="30" rx="6" fill="#6c63ff" fill-opacity="0.25"/>
+    <text x="66" y="64" text-anchor="middle" class="t sub">top-k imágenes</text>
+  </g>
+
+  <!-- flechas -->
+  <g fill="#9b7bff">
+    <path d="M262 252 l10 -6 v12 z"/>
+    <path d="M506 252 l10 -6 v12 z"/>
+    <path d="M730 252 l10 -6 v12 z"/>
+    <path d="M974 252 l10 -6 v12 z"/>
+  </g>
+</svg>
