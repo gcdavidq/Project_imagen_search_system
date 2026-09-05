@@ -59,7 +59,7 @@ def test_text_search_returns_formatted_results(client, ready_backend):
 
     first, second = body["results"]
     # URL pública preferida cuando existe; score redondeado a 4 decimales.
-    assert first["image_url"].startswith("https://images.cocodataset.org/")
+    assert first["image_url"].startswith("https://s3.amazonaws.com/images.cocodataset.org/")
     assert first["score"] == 0.3123
     assert first["categories"] == ["cat", "couch"]
     # Sin URL pública: se construye la URL local con separadores normalizados.

@@ -60,7 +60,7 @@ def _unit_vector(seed: int) -> np.ndarray:
 FAKE_HITS = [
     {
         "image_path": "coco_000000000001.jpg",
-        "image_url": "https://images.cocodataset.org/train2017/000000000001.jpg",
+        "image_url": "https://s3.amazonaws.com/images.cocodataset.org/train2017/000000000001.jpg",
         "categories": ["cat", "couch"],
         "score": 0.3123456,
     },

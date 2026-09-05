@@ -229,7 +229,7 @@ Documentación interactiva (Swagger) en `/docs`.
 {
   "results": [
     {
-      "image_url": "https://images.cocodataset.org/train2017/000000000009.jpg",
+      "image_url": "https://s3.amazonaws.com/images.cocodataset.org/train2017/000000000009.jpg",
       "score": 0.3121,
       "categories": ["bowl", "broccoli", "orange"]
     }

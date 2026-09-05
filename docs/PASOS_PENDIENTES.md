@@ -47,7 +47,7 @@ graph LR
     S -->|"3 · vecinos más cercanos"| N[("Neon<br/>pgvector + HNSW")]
     N -->|"4 · URLs + score + categorías"| S
     S -->|"5 · JSON"| U
-    U -->|"6 · descarga las fotos"| C["images.cocodataset.org<br/><i>CDN de MS COCO</i>"]
+    U -->|"6 · descarga las fotos"| C["s3.amazonaws.com<br/><i>bucket de MS COCO</i>"]
 ```
 
 Fíjate en el paso 6: **las imágenes viajan del CDN de COCO al navegador del usuario sin pasar por tu servidor**.
@@ -56,7 +56,7 @@ Fíjate en el paso 6: **las imágenes viajan del CDN de COCO al navegador del us
 
 | Servicio | Qué almacena | Tamaño | ¿Le importan las imágenes? |
 |----------|--------------|--------|----------------------------|
-| **Neon** | Vectores (512 floats), categorías y el **texto de la URL** de cada imagen | ~13 MB de vectores; con índice y metadatos, unas decenas de MB | No. Solo guarda la cadena `https://images.cocodataset.org/...` |
+| **Neon** | Vectores (512 floats), categorías y el **texto de la URL** de cada imagen | ~13 MB de vectores; con índice y metadatos, unas decenas de MB | No. Solo guarda la cadena `https://s3.amazonaws.com/images.cocodataset.org/...` |
 | **Cloud Run** (backend) | Código + modelo CLIP (~1,6 GB) dentro de la imagen Docker | ~3 GB de imagen | No. Su `data/` está vacío en producción |
 | **Render** (frontend) | HTML, CSS y JS compilados | ~30 KB | No. Solo pide las URLs que le da la API |
 | **CDN de MS COCO** | Las fotos reales | 18 GB (no tuyos) | Es quien las sirve, gratis y sin registro |
@@ -94,7 +94,9 @@ En resumen: **Render sirve el frontend** (archivos estáticos, sin necesidad de 
 
 ### 3. ¿Dónde se almacenan las imágenes? ¿Necesito S3?
 
-**No necesitas S3 ni ningún almacenamiento de objetos.** Las imágenes de MS COCO **ya están alojadas públicamente** por el propio proyecto COCO, en `https://images.cocodataset.org/`, y el sistema aprovecha eso.
+**No necesitas S3 ni ningún almacenamiento de objetos.** Las imágenes de MS COCO **ya están alojadas públicamente** por el propio proyecto COCO, en un bucket de Amazon S3, y el sistema aprovecha eso.
+
+> ⚠️ **Detalle que cuesta descubrir:** el dominio bonito `images.cocodataset.org` es un alias de ese bucket, pero **su certificado TLS no cubre ese nombre**: solo vale para `s3.amazonaws.com` y `*.s3.amazonaws.com`. Por eso `https://images.cocodataset.org/...` falla la verificación en cualquier cliente, navegadores incluidos, y `http://` no sirve porque un frontend servido con HTTPS bloquea el contenido mixto. La forma que sí funciona, y la que guarda el script, es **`https://s3.amazonaws.com/images.cocodataset.org/<ruta>`**, que entrega los mismos bytes con un certificado válido.
 
 Cómo funciona, concretamente:
 
@@ -102,7 +104,7 @@ Cómo funciona, concretamente:
    ```json
    "coco_000000000009.jpg": {
      "categories": ["bowl", "broccoli", "orange"],
-     "url": "https://images.cocodataset.org/train2017/000000000009.jpg"
+     "url": "https://s3.amazonaws.com/images.cocodataset.org/train2017/000000000009.jpg"
    }
    ```
 2. `build_index.py` escribe esa URL en la columna `image_url` de la tabla `images` en Neon.
@@ -117,7 +119,7 @@ Consecuencias prácticas:
 
 Y la imagen que el usuario sube para buscar por similitud tampoco se guarda: se lee en memoria, se convierte en un vector y se descarta. Puedes comprobarlo en [backend/routes/image_search.py](../backend/routes/image_search.py): los bytes van a `load_image_from_bytes()` y nunca a disco.
 
-**El único riesgo real** es depender de un CDN ajeno: si `images.cocodataset.org` se cae, las tarjetas se ven vacías (la búsqueda sigue funcionando, porque los vectores están en Neon). Si quieres ser autónomo, hay alternativas gratuitas en el [anexo](#anexo--si-algún-día-quieres-alojar-tú-las-imágenes).
+**El único riesgo real** es depender de un almacenamiento ajeno: si el bucket de COCO cambia o deja de ser público, las tarjetas se ven vacías (la búsqueda sigue funcionando, porque los vectores están en Neon). Si quieres ser autónomo, hay alternativas gratuitas en el [anexo](#anexo--si-algún-día-quieres-alojar-tú-las-imágenes).
 
 **Cuándo sí necesitarías almacenamiento de objetos:** si el catálogo fueran fotos tuyas o de usuarios, o un dataset privado. No es este caso.
 
@@ -210,7 +212,7 @@ python scripts/download_coco.py
 
 El script parsea un JSON de 450 MB **en memoria**; cierra programas pesados si tienes menos de 8 GB de RAM, o usa `--split val`.
 
-**Verificación:** `data/images/` tiene miles de `.jpg` y existe `data/metadata.json`. Cada entrada debe tener `categories` y `url` empezando por `https://images.cocodataset.org/`. **Esa URL es la clave del tema del almacenamiento.**
+**Verificación:** `data/images/` tiene miles de `.jpg` y existe `data/metadata.json`. Cada entrada debe tener `categories` y `url` empezando por `https://s3.amazonaws.com/images.cocodataset.org/`. **Esa URL es la clave del tema del almacenamiento.**
 
 ### 2.3 Generar embeddings y subirlos a Neon
 
@@ -405,7 +407,7 @@ curl -X POST "$SERVICE_URL/search/text" \
   -d '{"query":"un gato durmiendo","top_k":3}'
 ```
 
-Cada `image_url` de la respuesta debe apuntar a `images.cocodataset.org`. Y `$SERVICE_URL/docs` abre la documentación interactiva.
+Cada `image_url` de la respuesta debe apuntar a `s3.amazonaws.com/images.cocodataset.org`. Y `$SERVICE_URL/docs` abre la documentación interactiva.
 
 Los logs están en **Cloud Run → image-search → Logs**, o con `gcloud run services logs read image-search --region southamerica-east1`.
 
