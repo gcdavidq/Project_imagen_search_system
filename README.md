@@ -55,7 +55,7 @@ Ambas modalidades viven en el **mismo espacio vectorial de 512 dimensiones**: un
 
 > **Demo en vivo:** _pendiente de desplegar_ · **API:** _pendiente_
 >
-> <sub>Sigue la guía de [despliegue](#%EF%B8%8F-despliegue) y reemplaza estos enlaces.</sub>
+> <sub>Guía paso a paso de todo lo que falta, con comandos y verificaciones: [docs/PASOS_PENDIENTES.md](docs/PASOS_PENDIENTES.md).</sub>
 
 <!--
 Cuando tengas el demo desplegado, graba un GIF corto (p. ej. con ScreenToGif) y colócalo aquí:
