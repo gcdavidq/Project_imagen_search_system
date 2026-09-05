@@ -4,7 +4,7 @@ database.py
 Acceso a PostgreSQL + pgvector mediante un pool de conexiones psycopg2.
 
 Solo se utiliza cuando ``INDEX_BACKEND=pgvector``. Soporta configurar la
-conexión con ``DATABASE_URL`` (cadena completa, como la que entrega Supabase)
+conexión con ``DATABASE_URL`` (cadena completa, como la que entregan Neon o Supabase)
 o con las variables sueltas ``DB_HOST``, ``DB_PORT``, ``DB_NAME``, ``DB_USER``
 y ``DB_PASSWORD``.
 """

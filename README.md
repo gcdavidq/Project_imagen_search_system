@@ -103,19 +103,22 @@ cd frontend && npm install && npm run dev                         # → http://l
 |-----------|---------|-------|
 | Python | 3.10 – 3.13 | |
 | Node.js | 18+ | Solo para el frontend |
-| PostgreSQL + pgvector | 14+ | **Opcional.** `INDEX_BACKEND=faiss` no lo necesita. [Supabase](https://supabase.com) lo ofrece gratis. |
+| PostgreSQL + pgvector | 14+ | **Opcional.** `INDEX_BACKEND=faiss` no lo necesita. [Neon](https://neon.tech) lo ofrece gratis. |
 | Disco | ~4 GB | PyTorch CPU (~800 MB) + modelo (~1 GB) + imágenes (~1.5 GB con 100/categoría) |
 | RAM | 4 GB+ | El modelo multilingüe ocupa ~1.5 GB en memoria |
 
 </details>
 
 <details>
-<summary><b>Usar PostgreSQL / Supabase en lugar de FAISS</b></summary>
+<summary><b>Usar PostgreSQL en lugar de FAISS</b></summary>
 
-1. Crea un proyecto gratuito en [supabase.com](https://supabase.com).
-2. En *Project Settings → Database → Connection string* copia la URI.
-3. En `.env`: `INDEX_BACKEND=pgvector` y `DATABASE_URL=postgresql://...`.
-4. Ejecuta `python scripts/build_index.py`. La extensión `vector`, la tabla `images` y el índice HNSW se crean solos.
+Sirve cualquier PostgreSQL con la extensión `pgvector`: [Neon](https://neon.tech), [Supabase](https://supabase.com), Railway o uno local en Docker.
+
+1. Crea una base de datos y copia su cadena de conexión.
+2. En `.env`: `INDEX_BACKEND=pgvector` y `DATABASE_URL=postgresql://...`.
+3. Ejecuta `python scripts/build_index.py`. La extensión `vector`, la tabla `images` y el índice HNSW se crean solos.
+
+> Probado con **Neon** (PostgreSQL 18, pgvector 0.8): sin configuración adicional más allá de la cadena de conexión.
 
 </details>
 
@@ -168,6 +171,8 @@ graph LR
 2. **Consulta.** El texto o la imagen de consulta se codifica con CLIP al mismo espacio de 512 dimensiones.
 3. **Búsqueda.** pgvector calcula la distancia coseno con el operador `<=>` y devuelve los *k* vecinos más cercanos usando un índice HNSW (búsqueda aproximada, sub-milisegundo a escala de miles de vectores).
 4. **Respuesta.** La API devuelve URLs, similitud y categorías; el frontend pinta las tarjetas.
+
+> 🗂️ **¿Dónde se guardan las imágenes?** En ningún servidor propio. La base de datos guarda el vector y **la URL pública** de cada foto en el CDN de MS COCO, y el navegador la descarga directamente de ahí. El backend nunca sirve bytes de imagen: ni almacenamiento de objetos, ni ancho de banda, ni coste. La carpeta `data/images/` solo existe en la máquina donde se calculan los embeddings. La imagen que sube el usuario para buscar tampoco se guarda: se procesa en memoria y se descarta.
 
 <details>
 <summary><b>Decisiones de diseño</b></summary>
@@ -291,7 +296,7 @@ Errores: `400` entrada inválida (consulta vacía, archivo corrupto o > 10 MB) �
 | Variable | Descripción | Por defecto |
 |----------|-------------|-------------|
 | `INDEX_BACKEND` | `pgvector` o `faiss` | `pgvector` |
-| `DATABASE_URL` | Cadena de conexión PostgreSQL (Supabase la entrega lista) | — |
+| `DATABASE_URL` | Cadena de conexión PostgreSQL (Neon o Supabase la entregan lista) | — |
 | `DB_HOST` `DB_PORT` `DB_NAME` `DB_USER` `DB_PASSWORD` | Alternativa a `DATABASE_URL` | `5432` / `postgres` / `postgres` |
 | `MODEL_NAME` / `PRETRAINED` | Modelo CLIP (nomenclatura open_clip). Cambiarlo implica reconstruir el índice | `xlm-roberta-base-ViT-B-32` / `laion5b_s13b_b90k` |
 | `DATA_DIR` | Carpeta de imágenes, metadatos e índice FAISS | `<raíz>/data` |
@@ -309,16 +314,18 @@ Tres piezas, todas en **planes gratuitos**:
 
 | Pieza | Plataforma | Por qué |
 |-------|-----------|---------|
-| 🗄️ Base de datos | **Supabase** | PostgreSQL gestionado con pgvector incluido. 8 k vectores ≈ 16 MB. |
+| 🗄️ Base de datos | **Neon** | PostgreSQL serverless con pgvector incluido. 8 k vectores ≈ 16 MB. Se duerme sin uso y despierta en menos de un segundo. |
 | 🧠 Backend | **Hugging Face Spaces (Docker)** | 16 GB de RAM y 2 vCPU gratis. El backend necesita ~2 GB para PyTorch + CLIP, más de lo que dan los planes gratuitos de Render o Railway. |
 | 🖥️ Frontend | **Render (static site)** | Build de Vite y CDN, definido en `render.yaml`. |
 
 <details>
-<summary><b>1 · Supabase</b></summary>
+<summary><b>1 · Base de datos en Neon</b></summary>
 
-1. Crea un proyecto en [supabase.com](https://supabase.com).
-2. En *Project Settings → Database → Connection string* copia la URI (modo **Session** para la indexación).
-3. En tu máquina, con esa URI en `DATABASE_URL` y `INDEX_BACKEND=pgvector`, ejecuta `download_coco.py` y `build_index.py`. La tabla, la extensión y el índice HNSW se crean solos.
+1. Crea un proyecto en [neon.tech](https://neon.tech) (plan Free).
+2. En **Connect** copia la cadena de conexión del endpoint **`-pooler`**.
+3. En tu máquina, con esa URI en `DATABASE_URL` y `INDEX_BACKEND=pgvector`, ejecuta `download_coco.py` y `build_index.py`. La extensión `vector`, la tabla `images` y el índice HNSW se crean solos.
+
+La misma cadena sirve para indexar desde tu PC y para el backend en producción.
 
 </details>
 
@@ -328,7 +335,7 @@ Tres piezas, todas en **planes gratuitos**:
 1. Crea un Space en [huggingface.co/new-space](https://huggingface.co/new-space) con **SDK: Docker**, hardware **CPU basic (gratis)**.
 2. Sube el repositorio al Space o conéctalo a GitHub. El `Dockerfile` de la raíz expone el puerto `7860` y **pre-descarga el modelo y el tokenizador en el build**, así el contenedor arranca sin acceder a internet.
 3. En *Settings → Variables and secrets* define:
-   - `DATABASE_URL` (secret): la URI de Supabase, modo **Transaction pooler** (puerto 6543).
+   - `DATABASE_URL` (secret): la cadena de conexión de Neon (endpoint `-pooler`).
    - `INDEX_BACKEND=pgvector`
    - `CORS_ORIGINS`: la URL de tu frontend en Render (o `*` mientras pruebas).
 4. La primera build tarda ~10 min. Verifica `https://<usuario>-<space>.hf.space/health`.
