@@ -1,0 +1,34 @@
+# Archivos que NO se suben a Cloud Build al ejecutar `gcloud run deploy --source .`
+# (si este archivo no existe, gcloud usa .gitignore, pero conviene ser explícito:
+#  data/ puede pesar más de 1 GB y haría el despliegue lentísimo).
+
+.git
+.github
+.gitignore
+
+# Entornos y credenciales
+.env
+.venv
+venv
+env
+
+# Dataset e índices: no se necesitan en el backend desplegado
+data
+
+# Frontend: se despliega aparte en Render
+frontend
+
+# Desarrollo
+tests
+docs
+*.md
+!README.md
+pyproject.toml
+requirements-dev.txt
+render.yaml
+
+# Caches
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache

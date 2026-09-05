@@ -65,7 +65,7 @@ Cuando tengas el demo desplegado, graba un GIF corto (p. ej. con ScreenToGif) y 
 | | |
 |---|---|
 | **Interfaz** | Página única con pestañas texto / imagen, estados de carga, vacío y error, resultados con porcentaje de similitud y categorías COCO. |
-| **Estado del servidor** | El frontend consulta `/health` y muestra "Despertando el servidor…" durante el arranque en frío del Space, en lugar de fallar. |
+| **Estado del servidor** | El frontend consulta `/health` y muestra "Despertando el servidor…" durante el arranque en frío del contenedor, en lugar de fallar. |
 | **Sin registro, sin tracking** | No se guarda nada de lo que buscas ni de las imágenes que subes. |
 
 ## ⚡ Inicio rápido
@@ -146,7 +146,7 @@ graph LR
         UI["Página única<br/>texto / imagen"]
     end
 
-    subgraph Backend["Backend · FastAPI (Hugging Face Spaces)"]
+    subgraph Backend["Backend · FastAPI (Google Cloud Run)"]
         API["/search/text<br/>/search/image<br/>/health · /stats"]
         CLIP["CLIP multilingüe<br/>xlm-roberta-base-ViT-B-32"]
     end
@@ -282,7 +282,7 @@ Errores: `400` entrada inválida (consulta vacía, archivo corrupto o > 10 MB) �
 │   └── search_cli.py      # Búsqueda desde la terminal, sin servidor
 ├── tests/                 # pytest: API y utilidades (sin GPU ni base de datos)
 ├── docs/                  # Banner y capturas
-├── Dockerfile             # Backend para Hugging Face Spaces / cualquier host Docker
+├── Dockerfile             # Backend para Cloud Run o cualquier host que inyecte $PORT
 ├── render.yaml            # Blueprint de Render para el frontend estático
 ├── .github/workflows/ci.yml
 └── .env.example · requirements.txt · requirements-dev.txt · pyproject.toml
@@ -315,7 +315,7 @@ Tres piezas, todas en **planes gratuitos**:
 | Pieza | Plataforma | Por qué |
 |-------|-----------|---------|
 | 🗄️ Base de datos | **Neon** | PostgreSQL serverless con pgvector incluido. 8 k vectores ≈ 16 MB. Se duerme sin uso y despierta en menos de un segundo. |
-| 🧠 Backend | **Hugging Face Spaces (Docker)** | 16 GB de RAM y 2 vCPU gratis. El backend necesita ~2 GB para PyTorch + CLIP, más de lo que dan los planes gratuitos de Render o Railway. |
+| 🧠 Backend | **Google Cloud Run** | Ejecuta el `Dockerfile` sin cambios con 4 GiB de RAM y escala a cero. El backend usa 2,2 GB en régimen y 3,2 GB de pico al cargar el modelo, muy por encima de los 512 MB de los planes gratuitos de Render, Koyeb o Fly. |
 | 🖥️ Frontend | **Render (static site)** | Build de Vite y CDN, definido en `render.yaml`. |
 
 <details>
@@ -330,17 +330,20 @@ La misma cadena sirve para indexar desde tu PC y para el backend en producción.
 </details>
 
 <details>
-<summary><b>2 · Backend en Hugging Face Spaces</b></summary>
+<summary><b>2 · Backend en Google Cloud Run</b></summary>
 
-1. Crea un Space en [huggingface.co/new-space](https://huggingface.co/new-space) con **SDK: Docker**, hardware **CPU basic (gratis)**.
-2. Sube el repositorio al Space o conéctalo a GitHub. El `Dockerfile` de la raíz expone el puerto `7860` y **pre-descarga el modelo y el tokenizador en el build**, así el contenedor arranca sin acceder a internet.
-3. En *Settings → Variables and secrets* define:
-   - `DATABASE_URL` (secret): la cadena de conexión de Neon (endpoint `-pooler`).
-   - `INDEX_BACKEND=pgvector`
-   - `CORS_ORIGINS`: la URL de tu frontend en Render (o `*` mientras pruebas).
-4. La primera build tarda ~10 min. Verifica `https://<usuario>-<space>.hf.space/health`.
+El `Dockerfile` de la raíz sirve sin cambios: escucha en `$PORT` y **pre-descarga el modelo y el tokenizador durante el build**, así el contenedor arranca sin acceder a internet.
 
-Los Spaces gratuitos se duermen tras 48 h sin uso y tardan 1-2 min en despertar. El frontend lo detecta y muestra "Despertando el servidor…". La primera búsqueda tras el arranque es más lenta (calentamiento de PyTorch); las siguientes tardan unos cientos de milisegundos.
+```bash
+# Guarda la cadena de Neon como secreto (se pega por stdin, no queda en el historial)
+gcloud secrets create image-search-db --data-file=-
+
+gcloud run deploy image-search   --source . --region southamerica-east1   --memory 4Gi --cpu 2 --cpu-boost   --concurrency 4 --max-instances 2 --min-instances 0   --allow-unauthenticated   --set-env-vars INDEX_BACKEND=pgvector,CORS_ORIGINS=*   --set-secrets DATABASE_URL=image-search-db:latest
+```
+
+Verifica `https://image-search-xxxxx.run.app/health`. Los pasos completos, con la configuración de la cuenta y el control de gasto, están en [docs/PASOS_PENDIENTES.md](docs/PASOS_PENDIENTES.md).
+
+Cloud Run **escala a cero**: sin tráfico no hay contenedor ni consumo. El primer acceso tras un rato de inactividad arranca uno nuevo, que tarda unos 60 s en cargar el modelo; el frontend lo detecta y muestra "Despertando el servidor…".
 
 </details>
 
@@ -348,8 +351,8 @@ Los Spaces gratuitos se duermen tras 48 h sin uso y tardan 1-2 min en despertar.
 <summary><b>3 · Frontend en Render</b></summary>
 
 1. En [dashboard.render.com](https://dashboard.render.com) → *New → Blueprint* → selecciona el repositorio. Render lee `render.yaml`.
-2. Define `VITE_API_URL` con la URL pública del Space (sin barra final).
-3. Deploy. Después, actualiza `CORS_ORIGINS` en el Space con la URL que te asigne Render.
+2. Define `VITE_API_URL` con la URL pública de Cloud Run (sin barra final).
+3. Deploy. Después, actualiza `CORS_ORIGINS` en Cloud Run con la URL que te asigne Render.
 
 </details>
 

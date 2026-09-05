@@ -1,21 +1,26 @@
 # ---------------------------------------------------------------------------
-# Backend FastAPI + CLIP multilingüe, listo para Hugging Face Spaces (Docker).
+# Backend FastAPI + CLIP multilingüe.
+#
+# Pensado para Google Cloud Run, pero sirve en cualquier plataforma que
+# inyecte la variable PORT (Cloud Run, Railway, Koyeb, Fly.io...) o en local:
 #
 #   docker build -t image-search .
-#   docker run --rm -p 7860:7860 --env-file .env image-search
+#   docker run --rm -p 8080:8080 --env-file .env image-search
 #
-# El modelo CLIP se descarga en tiempo de build para que el contenedor
-# arranque en segundos en lugar de bajar ~1 GB en cada reinicio.
+# El modelo CLIP se descarga en tiempo de build, de modo que el contenedor
+# arranca sin acceder a internet y sin bajar ~1,6 GB en cada reinicio.
+#
+# Recursos mínimos medidos (2 vCPU): 55 s de carga, 2,2 GB en régimen y un
+# pico de 3,2 GB al deserializar los pesos. Despliega con 4 GiB de memoria.
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/app/.cache/huggingface \
-    PORT=7860
+    HF_HOME=/app/.cache/huggingface
 
-# Usuario sin privilegios (requisito de Hugging Face Spaces: uid 1000).
+# Usuario sin privilegios.
 RUN useradd -m -u 1000 appuser
 WORKDIR /app
 
@@ -44,9 +49,13 @@ COPY --chown=appuser:appuser scripts ./scripts
 USER appuser
 RUN mkdir -p /app/data/images /app/data/embeddings
 
-EXPOSE 7860
+# Se declara al final para no invalidar la cache de las capas caras.
+# Cloud Run inyecta PORT; este valor solo aplica en local u otras plataformas.
+ENV PORT=8080
+EXPOSE 8080
 
+# Cloud Run usa sus propias sondas y ignora este HEALTHCHECK; sirve en local.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
-    CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"7860\")}/health')" || exit 1
+    CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8080\")}/health')" || exit 1
 
 CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
