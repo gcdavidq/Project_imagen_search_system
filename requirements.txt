@@ -1,15 +1,25 @@
+# --- API ---------------------------------------------------------------------
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-open-clip-torch>=2.24.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
+
+# --- CLIP / ML ----------------------------------------------------------------
+# En despliegue (Docker) torch se instala primero desde el índice CPU de PyTorch
+# para evitar las ruedas CUDA de varios GB. Ver Dockerfile.
 torch>=2.6.0
-torchvision>=0.17.2
+torchvision>=0.21.0
+open-clip-torch>=2.24.0
+transformers>=4.40.0      # torre de texto XLM-RoBERTa del modelo multilingüe
+sentencepiece>=0.2.0      # tokenizador XLM-RoBERTa
 Pillow>=10.3.0
 numpy>=1.26.4
-faiss-cpu>=1.8.0
+
+# --- Búsqueda vectorial -------------------------------------------------------
+psycopg2-binary>=2.9.9    # backend pgvector (INDEX_BACKEND=pgvector)
+pgvector>=0.3.0
+faiss-cpu>=1.8.0          # backend offline (INDEX_BACKEND=faiss)
+
+# --- Scripts ------------------------------------------------------------------
+requests>=2.31.0
 tqdm>=4.66.4
-python-multipart>=0.0.9
-jinja2>=3.1.4
-aiofiles>=23.2.1
-python-dotenv>=1.0.1
-datasets>=2.19.1
-transformers>=4.40.0

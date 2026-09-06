@@ -3,20 +3,18 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
 
 import numpy as np
+import open_clip
 import torch
 from PIL import Image
-
-import open_clip
 
 from . import utils
 
 logger = logging.getLogger(__name__)
 
 
-_model: Optional[torch.nn.Module] = None
+_model: torch.nn.Module | None = None
 _preprocess = None
 _tokenizer = None
 _device: str = "cpu"
@@ -272,3 +270,27 @@ def get_image_embedding(image: Image.Image) -> np.ndarray:
     features = _model.encode_image(tensor)                 # type: ignore[union-attr]
     features = _l2_normalise(features)
     return features.cpu().numpy().astype("float32")[0]
+
+
+@torch.no_grad()
+def get_image_embeddings(images: list[Image.Image]) -> list[np.ndarray]:
+    """
+    Genera embeddings CLIP normalizados L2 para un lote de imágenes PIL.
+
+    Procesar varias imágenes en una sola pasada es mucho más rápido que
+    llamar a :func:`get_image_embedding` una por una (usado por
+    ``scripts/build_index.py``).
+
+    Returns
+    -------
+    List[np.ndarray]
+        Un vector ``float32`` de forma ``(embedding_dim,)`` por imagen, en el
+        mismo orden de entrada.
+    """
+    _ensure_loaded()
+    if not images:
+        return []
+    batch = torch.stack([_preprocess(img) for img in images]).to(_device)  # type: ignore[misc]
+    features = _model.encode_image(batch)                                  # type: ignore[union-attr]
+    features = _l2_normalise(features)
+    return list(features.cpu().numpy().astype("float32"))

@@ -1,0 +1,19 @@
+# Blueprint de Render para el frontend estático.
+# Render → New → Blueprint → seleccionar este repositorio.
+# El backend NO se despliega aquí: necesita 4 GiB de RAM para PyTorch + CLIP,
+# muy por encima del plan gratuito de Render. Vive en Google Cloud Run.
+# Ver README → Despliegue y docs/PASOS_PENDIENTES.md
+services:
+  - type: web
+    name: image-search-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false   # se define en el dashboard: URL pública del servicio en Cloud Run
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -1,6 +1,17 @@
 """
 indexer.py
+==========
+Capa de búsqueda vectorial con dos backends intercambiables mediante la
+variable de entorno ``INDEX_BACKEND``:
 
+- ``pgvector`` (por defecto): los vectores viven en PostgreSQL y la similitud
+  coseno se calcula en la base de datos con el operador ``<=>``. Se crea un
+  índice HNSW para búsqueda aproximada rápida.
+- ``faiss``: índice local ``IndexFlatIP`` en disco. No requiere base de datos
+  y sirve para trabajar offline. Como los embeddings están normalizados L2,
+  el producto interno equivale a la similitud coseno.
+
+Ambos backends devuelven exactamente la misma estructura de resultados.
 """
 
 from __future__ import annotations
@@ -8,367 +19,286 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import List, Dict, Optional
+from collections import Counter
 
 import numpy as np
 
 from backend import utils
-from backend.database import get_connection, init_db, execute_query
-from psycopg2.extras import Json
-from pgvector.psycopg2 import register_vector
 
 logger = logging.getLogger(__name__)
 
-# Bandera de estado
+BACKEND: str = utils.INDEX_BACKEND
+
 _ready = False
 
-# Toggle para usar FAISS o PostgreSQL
-USE_FAISS = False
-
-# Variables para FAISS
+# Estado del modo FAISS.
 _faiss_index = None
-_faiss_paths = []
-_faiss_metadata = {}
+_faiss_paths: list[str] = []
+_faiss_metadata: dict[str, dict] = {}
 
 
 def _as_float32_1d(vector: np.ndarray) -> np.ndarray:
-    """
-    Convierte un arreglo NumPy a un vector 1-D contiguo de tipo ``float32``.
-
-    Garantiza que el arreglo sea unidimensional y esté en memoria contigua
-    (C-order), requisito de las librerías FAISS y pgvector al recibir vectores.
-
-    Parameters
-    ----------
-    vector : np.ndarray
-        Arreglo NumPy de cualquier forma y tipo. Si tiene más de una
-        dimensión, se aplana automáticamente.
-
-    Returns
-    -------
-    np.ndarray
-        Arreglo 1-D de tipo ``float32`` con disposición de memoria contigua
-        (``np.ascontiguousarray``).
-    """
+    """Convierte cualquier arreglo a un vector 1-D ``float32`` contiguo."""
     arr = np.asarray(vector, dtype="float32")
     if arr.ndim > 1:
         arr = arr.flatten()
     return np.ascontiguousarray(arr)
 
 
-def build_index(embeddings: np.ndarray, image_paths: List[str]) -> None:
-    """
-    Inserta embeddings e imágenes en la tabla ``images`` de PostgreSQL.
+def _meta_for(path: str, metadata: dict[str, dict]) -> dict:
+    """Metadatos (categorías y URL pública) de una imagen por su nombre de archivo."""
+    return metadata.get(os.path.basename(path), {"categories": [], "url": ""})
 
-    Limpia la tabla existente, luego inserta en lote todos los vectores
-    junto con sus rutas de archivo y categorías (obtenidas de ``metadata.json``
-    si el archivo existe). Usa ``ON CONFLICT ... DO UPDATE`` para manejar
-    duplicados de forma idónea.
+
+# --------------------------------------------------------------------------- #
+# Construcción del índice
+# --------------------------------------------------------------------------- #
+
+def build_index(embeddings: np.ndarray, image_paths: list[str]) -> None:
+    """
+    Reemplaza el índice actual con los ``embeddings`` dados.
 
     Parameters
     ----------
     embeddings : np.ndarray
-        Matriz de forma ``(N, embedding_dim)`` con los vectores de embedding
-        generados por el modelo CLIP, uno por imagen. Tipo esperado: ``float32``.
+        Matriz ``(N, dim)`` float32 con vectores normalizados L2.
     image_paths : List[str]
-        Lista de ``N`` rutas de archivo relativas a ``utils.IMAGES_DIR``,
-        en el mismo orden que las filas de ``embeddings``.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    ValueError
-        Si el número de embeddings no coincide con el número de rutas,
-        o si se pasa una matriz vacía (0 vectores).
-    psycopg2.Error
-        Cualquier error de PostgreSQL durante la inserción. La transacción
-        se revierte (rollback) automáticamente y el error se re-lanza.
-    Exception
-        Errores de conexión provenientes de ``get_connection()`` o de
-        ``init_db()``.
-
-    Notes
-    -----
-    - Llama a ``init_db()`` internamente para garantizar que la extensión
-      pgvector y la tabla ``images`` existan antes de insertar.
-    - Usa ``psycopg2.extras.execute_batch`` con ``page_size=100`` para
-      mejor rendimiento en inserciones masivas.
-    - Al finalizar exitosamente, actualiza la bandera global ``_ready = True``.
-    - El archivo ``metadata.json`` debe ubicarse en ``utils.DATA_DIR`` y
-      tener la forma ``{"nombre_archivo.jpg": ["categoria1", ...], ...}``.
+        ``N`` rutas relativas a ``utils.IMAGES_DIR``, en el mismo orden.
     """
-    # Asegurarnos de que la base de datos (y la extensión vector) estén inicializadas
-    init_db()
-    
-    n_vectors = embeddings.shape[0]
-
+    n_vectors = int(embeddings.shape[0])
     if n_vectors != len(image_paths):
         raise ValueError(
-            f"El número de incrustaciones ({n_vectors}) no coincide con el número de "
-            f"rutas de imagen ({len(image_paths)})."
+            f"El número de embeddings ({n_vectors}) no coincide con el de rutas ({len(image_paths)})."
         )
     if n_vectors == 0:
-        raise ValueError("No se puede construir un índice con cero incrustaciones.")
+        raise ValueError("No se puede construir un índice con cero embeddings.")
 
-    logger.info("Insertando %d vectores en PostgreSQL ...", n_vectors)
+    metadata = utils.load_metadata()
 
-    # Cargar metadatos si existen
-    metadata_path = os.path.join(utils.DATA_DIR, "metadata.json")
-    metadata = {}
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r", encoding="utf-8") as handle:
-            metadata = json.load(handle)
-
-    conn = get_connection()
-    try:
-        register_vector(conn)
-        with conn.cursor() as cur:
-            # Limpiar datos existentes para un índice nuevo (opcional, pero consistente con el comportamiento de FAISS)
-            cur.execute("TRUNCATE TABLE images;")
-            
-            # Usar execute_batch para un mejor rendimiento
-            from psycopg2.extras import execute_batch
-            
-            insert_query = """
-                INSERT INTO images (image_path, categories, embedding)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (image_path) DO UPDATE SET 
-                    categories = EXCLUDED.categories,
-                    embedding = EXCLUDED.embedding;
-            """
-            
-            records = []
-            for i in range(n_vectors):
-                path = image_paths[i]
-                filename = os.path.basename(path)
-                cats = metadata.get(filename, [])
-                vec = _as_float32_1d(embeddings[i])
-                records.append((path, Json(cats), vec))
-                
-            execute_batch(cur, insert_query, records, page_size=100)
-            
-        conn.commit()
-        logger.info("Vectores insertados exitosamente.")
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error al insertar vectores: {e}")
-        raise
-    finally:
-        conn.close()
+    if BACKEND == "faiss":
+        _build_faiss(embeddings, image_paths, metadata)
+    else:
+        _build_pgvector(embeddings, image_paths, metadata)
 
     global _ready
     _ready = True
 
 
+def _build_pgvector(embeddings: np.ndarray, image_paths: list[str], metadata: dict) -> None:
+    from psycopg2.extras import Json, execute_batch
+
+    from backend.database import connection, init_db
+
+    init_db()
+    logger.info("Insertando %d vectores en PostgreSQL ...", len(image_paths))
+
+    records = []
+    for i, path in enumerate(image_paths):
+        meta = _meta_for(path, metadata)
+        records.append(
+            (path, meta["url"] or None, Json(meta["categories"]), _as_float32_1d(embeddings[i]))
+        )
+
+    insert_sql = """
+        INSERT INTO images (image_path, image_url, categories, embedding)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (image_path) DO UPDATE SET
+            image_url  = EXCLUDED.image_url,
+            categories = EXCLUDED.categories,
+            embedding  = EXCLUDED.embedding;
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE images;")
+            execute_batch(cur, insert_sql, records, page_size=200)
+            # Índice HNSW para búsqueda aproximada (ANN) por distancia coseno.
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS images_embedding_hnsw_idx "
+                "ON images USING hnsw (embedding vector_cosine_ops);"
+            )
+    logger.info("Vectores insertados e índice HNSW verificado.")
+
+
+def _build_faiss(embeddings: np.ndarray, image_paths: list[str], metadata: dict) -> None:
+    import faiss
+
+    global _faiss_index, _faiss_paths, _faiss_metadata
+
+    utils.ensure_dirs()
+    matrix = np.ascontiguousarray(embeddings.astype("float32"))
+    index = faiss.IndexFlatIP(matrix.shape[1])
+    index.add(matrix)
+
+    faiss.write_index(index, utils.FAISS_INDEX_PATH)
+    with open(utils.FAISS_PATHS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(list(image_paths), handle, ensure_ascii=False)
+
+    _faiss_index = index
+    _faiss_paths = list(image_paths)
+    _faiss_metadata = metadata
+    logger.info("Índice FAISS guardado en %s (%d vectores).", utils.FAISS_INDEX_PATH, index.ntotal)
+
+
+# --------------------------------------------------------------------------- #
+# Carga al arranque
+# --------------------------------------------------------------------------- #
+
 def load_index() -> None:
     """
-    Inicializa el backend de búsqueda (PostgreSQL o FAISS) al arranque del servidor.
+    Inicializa el backend activo al arrancar el servidor.
 
-    Si ``USE_FAISS`` es ``True``: lee el índice FAISS desde disco
-    (``utils.INDEX_PATH``) y carga los metadatos de rutas e imágenes.
-    Si ``USE_FAISS`` es ``False`` (por defecto): invoca ``init_db()`` para
-    asegurar el esquema y verifica cuántos vectores hay en PostgreSQL.
-
-    Parameters
-    ----------
-    Ninguno.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    Exception
-        Cualquier error de conexión o de I/O al leer archivos FAISS.
-        En el flujo normal de FastAPI este error se captura en ``lifespan``
-        y el servidor arranca de todas formas en modo degradado (HTTP 503).
-
-    Notes
-    -----
-    - Para el modo FAISS: si los archivos de índice no existen, establece
-      ``_ready = False`` y retorna sin lanzar excepción.
-    - Al finalizar exitosamente en cualquier modo, actualiza ``_ready = True``.
-    - Esta función debe ser llamada una única vez durante el ciclo de vida
-      (lifespan) de la aplicación FastAPI.
+    Lanza una excepción si el backend no está disponible (sin BD, sin archivos
+    FAISS). ``main.lifespan`` la captura para arrancar en modo degradado.
     """
     global _ready, _faiss_index, _faiss_paths, _faiss_metadata
-    
-    if USE_FAISS:
+
+    if BACKEND == "faiss":
         import faiss
-        logger.info("Inicializando el indexador FAISS ...")
-        if not os.path.exists(utils.INDEX_PATH) or not os.path.exists(utils.PATHS_PATH):
-            logger.warning("No se encontraron los archivos del índice FAISS.")
-            _ready = False
-            return
-            
-        _faiss_index = faiss.read_index(utils.INDEX_PATH)
-        with open(utils.PATHS_PATH, "r", encoding="utf-8") as f:
-            _faiss_paths = json.load(f)
-            
-        metadata_path = os.path.join(utils.DATA_DIR, "metadata.json")
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                _faiss_metadata = json.load(f)
-                
-        logger.info("Índice FAISS cargado. Vectores totales: %d", _faiss_index.ntotal)
+
+        if not (os.path.exists(utils.FAISS_INDEX_PATH) and os.path.exists(utils.FAISS_PATHS_PATH)):
+            raise FileNotFoundError(
+                f"No existe el índice FAISS en {utils.EMBEDDINGS_DIR}. "
+                "Ejecuta 'python scripts/build_index.py' primero."
+            )
+        _faiss_index = faiss.read_index(utils.FAISS_INDEX_PATH)
+        with open(utils.FAISS_PATHS_PATH, encoding="utf-8") as handle:
+            _faiss_paths = json.load(handle)
+        _faiss_metadata = utils.load_metadata()
         _ready = True
-    else:
-        logger.info("Inicializando el indexador PostgreSQL ...")
-        init_db()
-        
-        # Comprobar si hay datos
-        size = index_size()
-        logger.info("PostgreSQL listo. Vectores actuales en la base de datos: %d", size)
-        _ready = True
+        logger.info("Índice FAISS cargado: %d vectores.", _faiss_index.ntotal)
+        return
+
+    from backend.database import init_db
+
+    init_db()
+    _ready = True
+    logger.info("PostgreSQL listo: %d vectores en la tabla images.", index_size())
 
 
 def is_ready() -> bool:
-    """
-    Indica si el indexador fue inicializado y está listo para responder búsquedas.
-
-    Parameters
-    ----------
-    Ninguno.
-
-    Returns
-    -------
-    bool
-        ``True`` si ``load_index()`` o ``build_index()`` completaron
-        exitosamente; ``False`` en caso contrario.
-    """
+    """``True`` si el índice está cargado y se pueden atender búsquedas."""
     return _ready
 
 
 def index_size() -> int:
-    """
-    Retorna el número total de vectores almacenados en el backend activo.
-
-    Consulta ``COUNT(*)`` en PostgreSQL (modo por defecto) o lee
-    ``_faiss_index.ntotal`` en modo FAISS.
-
-    Parameters
-    ----------
-    Ninguno.
-
-    Returns
-    -------
-    int
-        Número de imágenes/vectores indexados. Retorna ``0`` si el indexador
-        no está listo o si ocurre cualquier error durante la consulta.
-    """
-    if not is_ready():
+    """Número de vectores indexados (0 si el índice no está listo)."""
+    if not _ready:
         return 0
-    if USE_FAISS:
-        return _faiss_index.ntotal if _faiss_index else 0
-        
+    if BACKEND == "faiss":
+        return int(_faiss_index.ntotal) if _faiss_index is not None else 0
+
+    from backend.database import connection
+
     try:
-        res = execute_query("SELECT count(*) FROM images;")
-        return res[0][0] if res else 0
-    except Exception:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM images;")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo contar los vectores: %s", exc)
         return 0
 
 
-def search(query_embedding: np.ndarray, top_k: int = utils.TOP_K_DEFAULT) -> List[Dict]:
+# --------------------------------------------------------------------------- #
+# Búsqueda
+# --------------------------------------------------------------------------- #
+
+def search(query_embedding: np.ndarray, top_k: int = utils.TOP_K_DEFAULT) -> list[dict]:
     """
-    Recupera las ``top_k`` imágenes más similares al vector de consulta.
+    Devuelve las ``top_k`` imágenes más similares al vector de consulta.
 
-    Ejecuta una búsqueda por similitud del coseno contra todos los vectores
-    almacenados (PostgreSQL con pgvector o índice FAISS) y retorna los
-    resultados ordenados de mayor a menor similitud.
-
-    Parameters
-    ----------
-    query_embedding : np.ndarray
-        Vector de consulta 1-D de tipo ``float32`` con forma
-        ``(embedding_dim,)`` (p.ej. ``(512,)`` para ViT-B/32).
-        Debe estar normalizado L2 para que la búsqueda sea correcta.
-    top_k : int, opcional
-        Número máximo de resultados a retornar.
-        Por defecto usa ``utils.TOP_K_DEFAULT`` (valor configurado en ``.env``).
-
-    Returns
-    -------
-    List[Dict]
-        Lista de hasta ``top_k`` diccionarios, ordenada de mayor a menor
-        similitud. Cada diccionario tiene las siguientes claves:
-
-        - ``"image_path"`` (str): ruta relativa de la imagen en ``IMAGES_DIR``.
-        - ``"categories"`` (list): lista de etiquetas/categorías de la imagen
-          (puede ser lista vacía si no hay metadatos).
-        - ``"score"`` (float): puntuación de similitud en rango ``[0.0, 1.0]``
-          (1 - distancia del coseno para PostgreSQL; distancia L2 para FAISS).
-
-    Raises
-    ------
-    RuntimeError
-        Si ``is_ready()`` retorna ``False`` (el indexador no fue inicializado).
-    psycopg2.Error
-        Cualquier error de PostgreSQL durante la consulta vectorial.
-    Exception
-        Errores de conexión provenientes de ``get_connection()``.
-
-    Notes
-    -----
-    - En modo PostgreSQL, el operador ``<=>`` de pgvector calcula la
-      **distancia del coseno** (no similitud). La similitud se obtiene
-      como ``1 - distancia``, por lo que el rango es ``[-1, 1]``.
-    - En modo FAISS, el score es la **distancia L2** (menor es mejor);
-      no se invierte para mantener compatibilidad con el índice interno.
-    - Esta función es síncrona; en FastAPI debe ejecutarse con
-      ``run_in_threadpool`` para no bloquear el event loop.
+    Cada resultado contiene ``image_path``, ``image_url`` (puede ser vacío),
+    ``categories`` y ``score`` (similitud coseno, mayor es mejor).
     """
-    if not is_ready():
-        raise RuntimeError("El indexador no está listo. Llame a load_index() primero.")
+    if not _ready:
+        raise RuntimeError("El índice no está listo. Construye el índice y reinicia el servidor.")
 
     query_vec = _as_float32_1d(query_embedding)
-    
-    if USE_FAISS:
-        import faiss
-        query_vec_2d = np.expand_dims(query_vec, axis=0)
-        distances, indices = _faiss_index.search(query_vec_2d, top_k)
-        
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx == -1:
-                continue
-            path = _faiss_paths[idx]
-            filename = os.path.basename(path)
-            cats = _faiss_metadata.get(filename, [])
-            results.append({
+    top_k = max(1, min(int(top_k), utils.TOP_K_MAX))
+
+    if BACKEND == "faiss":
+        return _search_faiss(query_vec, top_k)
+    return _search_pgvector(query_vec, top_k)
+
+
+def _search_faiss(query_vec: np.ndarray, top_k: int) -> list[dict]:
+    scores, indices = _faiss_index.search(query_vec[np.newaxis, :], top_k)
+    results: list[dict] = []
+    for score, idx in zip(scores[0], indices[0], strict=True):
+        if idx < 0:
+            continue
+        path = _faiss_paths[idx]
+        meta = _meta_for(path, _faiss_metadata)
+        results.append(
+            {
                 "image_path": path,
-                "categories": cats,
-                "score": float(dist)
-            })
-        return results
-    
-    # <=> es la distancia del coseno. 1 - distancia = similitud. 
+                "image_url": meta["url"],
+                "categories": meta["categories"],
+                "score": float(score),
+            }
+        )
+    return results
+
+
+def _search_pgvector(query_vec: np.ndarray, top_k: int) -> list[dict]:
+    from backend.database import connection
+
+    # ``<=>`` es la distancia coseno; 1 - distancia = similitud.
     sql = """
-        SELECT image_path, categories, 1 - (embedding <=> %s) AS similarity
+        SELECT image_path, image_url, categories, 1 - (embedding <=> %s) AS similarity
         FROM images
         ORDER BY embedding <=> %s
         LIMIT %s;
     """
-    
-    conn = get_connection()
-    try:
-        register_vector(conn)
+    with connection() as conn:
         with conn.cursor() as cur:
+            # HNSW devuelve como máximo ef_search candidatos; debe ser >= LIMIT.
+            cur.execute("SET LOCAL hnsw.ef_search = %s;", (max(40, top_k * 2),))
             cur.execute(sql, (query_vec, query_vec, top_k))
             rows = cur.fetchall()
-            
-            results = []
-            for row in rows:
-                path, cats, sim = row
-                # psycopg2 maneja el análisis sintáctico de jsonb de forma nativa al usar Json
-                results.append({
-                    "image_path": path,
-                    "categories": cats if cats else [],
-                    "score": float(sim)
-                })
-            return results
-    finally:
-        conn.close()
+
+    return [
+        {
+            "image_path": path,
+            "image_url": url or "",
+            "categories": list(cats) if cats else [],
+            "score": float(sim),
+        }
+        for path, url, cats, sim in rows
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Estadísticas
+# --------------------------------------------------------------------------- #
+
+def stats() -> dict:
+    """Total de imágenes y conteo por categoría del índice activo."""
+    if not _ready:
+        return {"backend": BACKEND, "total_images": 0, "categories": []}
+
+    if BACKEND == "faiss":
+        counter: Counter = Counter()
+        for path in _faiss_paths:
+            counter.update(_meta_for(path, _faiss_metadata)["categories"])
+        categories = [{"name": name, "count": count} for name, count in counter.most_common()]
+        return {"backend": BACKEND, "total_images": len(_faiss_paths), "categories": categories}
+
+    from backend.database import connection
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM images;")
+            total = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                SELECT category, count(*) AS n
+                FROM images, jsonb_array_elements_text(categories) AS category
+                WHERE jsonb_typeof(categories) = 'array'
+                GROUP BY category
+                ORDER BY n DESC, category ASC;
+                """
+            )
+            categories = [{"name": name, "count": int(n)} for name, n in cur.fetchall()]
+    return {"backend": BACKEND, "total_images": total, "categories": categories}
