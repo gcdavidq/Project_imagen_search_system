@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import open_clip
 
 # Hacer importable el paquete ``backend`` al ejecutar el script directamente.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
